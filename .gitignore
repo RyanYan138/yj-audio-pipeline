@@ -1,0 +1,22 @@
+# outputs / large artifacts
+output/
+dns_mos/output/
+asr/whisperoutput/
+**/*.json
+**/*.tsv
+**/*.sqlite
+**/*.db
+
+# caches
+hf_cache/
+torch_cache/
+**/__pycache__/
+**/*.pyc
+
+# env / local
+.env
+*.log
+
+# data (never commit)
+datas/
+data/
