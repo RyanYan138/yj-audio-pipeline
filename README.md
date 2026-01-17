@@ -28,9 +28,11 @@ VAD 这一步用的是 silero-vad 包里提供的 load_silero_vad / read_audio /
 
 run_all.bash：一键总入口（强烈建议只改顶部配置区）
 
+
 vad/
 
 vad_pipeline.py：Silero VAD 多进程切分
+
 
 dns_mos/
 
@@ -39,6 +41,7 @@ eval_dns_from_vad_json.py：对 segments.json 打 DNSMOS
 merge_dns_by_json_order.py：按 json 顺序 merge shards
 
 filter_dnsmos_tsv.py：按阈值/分位数过滤
+
 
 spk/
 
@@ -50,6 +53,7 @@ lang_id_filter.py：语种识别与过滤
 
 tsv_to_segments_json.py：把过滤后的 TSV 转回 Whisper segments.json（你之前报错就是缺它）
 
+
 asr/
 
 whisper_ms_from_segments.py：Whisper 多卡分片转写
@@ -57,6 +61,7 @@ whisper_ms_from_segments.py：Whisper 多卡分片转写
 merge_whisper_shards.py：merge shard 输出
 
 output/：最终/中间输出（可自定义）
+
 
 依赖与环境
 
@@ -134,7 +139,7 @@ DO_SPEAKER=1
 
 把 VAD_MAX_FILES=100（或更小）即可。空字符串表示全量。
 
-你们这次遇到的两个关键坑
+这次遇到的两个关键坑
 坑 1：DNSMOS merge 把 “merged 文件自己”也当成 shard 读进去了
 
 你日志里出现了：
@@ -179,6 +184,7 @@ Git 使用小抄（含“删除文件没同步”的原因）
 你遇到的现象：删除了 setup.bash，但提交后远端还在。
 
 原因是你用了 git add .，它在你的 Git 版本里默认不会记录“删除”（你也看到了那段 warning）。
+
 
 正确做法二选一：
 
