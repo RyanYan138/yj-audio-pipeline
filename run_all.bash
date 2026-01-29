@@ -18,26 +18,28 @@ set -euo pipefail
 # 如果输出已存在，是否强制重跑（1=重跑 / 0=自动跳过）
 FORCE=0
 # ========== 基础路径 ==========
-NOW_PROJECT="/CDShare3/Huawei_Encoder_Proj"
+NOW_PROJECT="/Work21"   #给docker挂路径让他能访问到数据，往大了挂 就行
 PROJECT_ROOT="/CDShare3/Huawei_Encoder_Proj/codes/jiahao/Yj_Pipeline"
 CONDA_SOURCE="/Work21/2025/yanjiahao/miniconda3/etc/profile.d/conda.sh"
-
+DATASET_NAME="seame" #DATAset Name
+OUT_PUT_DIR="${PROJECT_ROOT}/output/${DATASET_NAME}" #to do 所有的输出的头目录
+GPUS=(3 4 5)
 # ========== VAD ==========
 CONDA_ENV_VAD="/Work21/2025/yanjiahao/conda-envs/Huawei_Encoder_Vad"
 VAD_PIPELINE_PY="${PROJECT_ROOT}/vad/vad_pipeline.py"
-VAD_INPUT_ROOT="/CDShare3/Huawei_Encoder_Proj/datas/LibriSpeech/test-other"
-VAD_OUT_JSON="${PROJECT_ROOT}/output/librispeech_silero_vad_segments_mp_Ordered.json"
+VAD_INPUT_ROOT="/Work21/2026/xuzhao/DATA/seame"      #to do 输入文件
+VAD_OUT_JSON="${OUT_PUT_DIR}/vad_output/${DATASET_NAME}_silero_vad_segments_mp_Ordered.json"  #to do VAD文件输出
 VAD_MIN_DUR="0.75"
 VAD_NUM_WORKERS="32"
-VAD_MAX_FILES="100"   # 空=全量；例如 1000
+VAD_MAX_FILES=""   #  todo 空=全量；例如 1000
 
 # ========== DNSMOS ==========
 DNSMOS_DIR="${PROJECT_ROOT}/dns_mos"
 DNSMOS_DOCKER_IMAGE="dnsmos_gpu:cuda118"
-DNSMOS_SAVE_HOME="${DNSMOS_DIR}/output"
+DNSMOS_SAVE_HOME="${OUT_PUT_DIR}/dnsmos_output"       #to do 第一步存储的位置后续都要从这里读
 DNSMOS_INPUT_LENGTH="9"
 DNSMOS_MIN_DUR="1.0"
-DNSMOS_GPUS=(3 5)
+DNSMOS_GPUS=("${GPUS[@]}")
 DNSMOS_MERGED_TSV="${DNSMOS_SAVE_HOME}/dns_from_vad_all.json_order.tsv"
 
 # ========== DNSMOS 过滤 ==========
@@ -58,7 +60,7 @@ SPEAKER_IN_TSV="${DNSMOS_FILTERED_TSV}"
 SPEAKER_OUT_TSV="${DNSMOS_SAVE_HOME}/spk_filtered.tsv"
 SPEAKER_CACHE_DB="${DNSMOS_SAVE_HOME}/spk_emb_cache.sqlite"
 SPEAKER_ADD_SCORES_TSV="${DNSMOS_SAVE_HOME}/spk_scores_all.tsv"
-SPEAKER_DEVICE="cuda:0"
+SPEAKER_DEVICE="cuda:5"
 SPEAKER_MIN_DUR="1.0"
 SPEAKER_MIN_SIM_SPK="0.60"
 SPEAKER_MIN_SIM_FILE="0.65"
@@ -73,9 +75,9 @@ LANG_CACHE_DB="${DNSMOS_SAVE_HOME}/lang_cache.sqlite"
 LANG_MODEL_ID="Systran/faster-whisper-large-v3"
 LANG_DEVICE="cuda"
 LANG_COMPUTE_TYPE="float16"
-LANG_TARGET_LANG="en"       # 例如 en / zh / ja ...
+LANG_TARGET_LANGS=("en" "zh")       # 例如 en / zh / ja ...                 #to do 语言设置
 LANG_MIN_PROB="0.90"
-
+LANG_GPU_BIND=2                       #to do GPU选择
 # 把 lang_filtered.tsv 变成 whisper 用的 segments json
 TSV2SEG_PY="${LANG_DIR}/tsv_to_segments_json.py"
 LANG_SEG_JSON="${DNSMOS_SAVE_HOME}/lang_filtered_segments.json"
@@ -84,8 +86,8 @@ LANG_SEG_JSON="${DNSMOS_SAVE_HOME}/lang_filtered_segments.json"
 CONDA_ENV_ASR="/Work21/2025/yanjiahao/conda-envs/asr_whisper"
 ASR_DIR="${PROJECT_ROOT}/asr"
 WHISPER_SEG_JSON="${LANG_SEG_JSON}"
-WHISPER_OUT_PREFIX="${PROJECT_ROOT}/output/whisper_lv3"
-WHISPER_GPUS=(3 5)
+WHISPER_OUT_PREFIX="${OUT_PUT_DIR}/whisper_lv3_output/${DATASET_NAME}"    #to do asrout地址/name前缀
+WHISPER_GPUS=("${GPUS[@]}")
 WHISPER_BATCH_SIZE="16"
 WHISPER_MAX_FILES=""   # 空=全量；例如 1000
 
@@ -284,6 +286,8 @@ if [[ "$DO_LID" -eq 1 ]]; then
     conda_activate "${CONDA_ENV_LID}"
 
     pushd "${LANG_DIR}" >/dev/null
+
+    CUDA_VISIBLE_DEVICES="${LANG_GPU_BIND}" \
     python3 lang_id_filter.py \
       --in_tsv "${LANG_IN_TSV}" \
       --out_scores "${LANG_OUT_SCORES}" \
@@ -292,7 +296,7 @@ if [[ "$DO_LID" -eq 1 ]]; then
       --model_id "${LANG_MODEL_ID}" \
       --device "${LANG_DEVICE}" \
       --compute_type "${LANG_COMPUTE_TYPE}" \
-      --target_lang "${LANG_TARGET_LANG}" \
+      --target_langs "${LANG_TARGET_LANGS[@]}" \
       --min_lang_prob "${LANG_MIN_PROB}"
     popd >/dev/null
 

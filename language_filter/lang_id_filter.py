@@ -125,7 +125,10 @@ def main():
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--compute_type", default="float16")
 
-    ap.add_argument("--target_lang", default="en")
+    ap.add_argument("--target_lang", default="en",
+                help="(deprecated) single target lang, kept for backward compatibility")
+    ap.add_argument("--target_langs", nargs="*", default=None,
+                help="Multiple target langs, e.g. --target_langs en zh")
     ap.add_argument("--min_lang_prob", type=float, default=0.90)
 
     ap.add_argument("--probe_max_sec", type=float, default=12.0,
@@ -134,6 +137,43 @@ def main():
                     help="If probe is too short, mark as too_short_for_lid")
 
     args = ap.parse_args()
+    def _parse_target_langs(args) -> List[str]:
+        # 优先用 --target_langs；没给就回退到 --target_lang
+        if args.target_langs is None or len(args.target_langs) == 0:
+            raw = [args.target_lang]
+        else:
+            raw = args.target_langs
+
+        # 允许用户写成 "en,zh" 这种
+        out = []
+        for x in raw:
+            if x is None:
+                continue
+            for t in str(x).replace(",", " ").split():
+                t = t.strip().lower()
+                if t:
+                    out.append(t)
+        # 去重但保序
+        seen = set()
+        uniq = []
+        for t in out:
+            if t not in seen:
+                uniq.append(t)
+                seen.add(t)
+        return uniq
+
+    target_langs = _parse_target_langs(args)
+
+    def _lang_hit(lang: str, targets: List[str]) -> bool:
+        # faster-whisper 通常给 "en"/"zh"；也可能出现 "zh-cn" 这类，做个 base 匹配
+        lang = (lang or "").strip().lower()
+        if not lang:
+            return False
+        if lang in targets:
+            return True
+        base = lang.split("-")[0]
+        return base in targets
+
 
     header, rows = read_tsv(args.in_tsv)
     if not rows:
@@ -228,12 +268,13 @@ def main():
         elif status == "too_short_for_lid":
             keep_reason = "too_short_for_lid"
         else:
-            if lang != args.target_lang:
+            if not _lang_hit(lang, target_langs):
                 keep_reason = "not_target_lang"
             elif prob < args.min_lang_prob:
                 keep_reason = "low_lang_prob"
             else:
                 keep_reason = "keep"
+            
 
         rr = dict(r.raw)
         rr["lang"] = lang

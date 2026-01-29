@@ -5,6 +5,7 @@ from pathlib import Path
 import torch
 import soundfile as sf
 import numpy as np
+import traceback
 
 from modelscope import AutoModelForSpeechSeq2Seq, AutoProcessor
 from transformers import pipeline
@@ -154,37 +155,42 @@ def main():
         nonlocal batch_inputs, batch_metas, results
         if not batch_inputs:
             return
+
         try:
             if args.language:
                 outs = asr_pipe(
                     batch_inputs,
-                    generate_kwargs={
-                        "language": args.language,
-                        "task": "transcribe",
-                    },
+                    generate_kwargs={"language": args.language, "task": "transcribe"},
                 )
             else:
                 outs = asr_pipe(batch_inputs)
+
+            outs_list = [outs] if isinstance(outs, dict) else outs
+            for out, meta in zip(outs_list, batch_metas):
+                r = meta.copy()
+                r["text"] = (out.get("text") or "").strip()
+                results.append(r)
+
         except Exception as e:
-            print(f"[WARN] batch ASR failed: {e}")
-            # 出错直接清空这个 batch，避免死循环
+            print(f"[WARN] batch ASR failed: {repr(e)}")
+            print(traceback.format_exc())
+
+            msg = str(e).lower()
+            err_type = "oom" if ("out of memory" in msg or ("cuda" in msg and "memory" in msg)) else "asr_error"
+
+            for meta in batch_metas:
+                r = meta.copy()
+                r["text"] = ""
+                r["error"] = f"asr_failed:{err_type}"
+                results.append(r)
+
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
+        finally:
             batch_inputs = []
             batch_metas = []
-            return
 
-        if isinstance(outs, dict):
-            outs_list = [outs]
-        else:
-            outs_list = outs
-
-        for out, meta in zip(outs_list, batch_metas):
-            text = (out.get("text") or "").strip()
-            r = meta.copy()
-            r["text"] = text
-            results.append(r)
-
-        batch_inputs = []
-        batch_metas = []
 
     # ===== 主循环：逐文件、逐 segment，攒 batch 推理 =====
     for idx, item in enumerate(shard_items, start=1):
