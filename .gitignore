@@ -20,3 +20,5 @@ torch_cache/
 # data (never commit)
 datas/
 data/
+core.*
+dns_mos/core.*

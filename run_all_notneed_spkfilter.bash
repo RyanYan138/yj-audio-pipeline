@@ -21,32 +21,43 @@ FORCE=0
 NOW_PROJECT="/CDShare3"   #给docker挂路径让他能访问到数据，往大了挂 就行
 PROJECT_ROOT="/CDShare3/Huawei_Encoder_Proj/codes/jiahao/Yj_Pipeline"
 CONDA_SOURCE="/Work21/2025/yanjiahao/miniconda3/etc/profile.d/conda.sh"
-DATASET_NAME="common_voice_20hnew" #DATAset Name
-OUT_PUT_DIR="${PROJECT_ROOT}/output/${DATASET_NAME}" #to do 所有的输出的头目录
-GPUS=(1 2)
+DATASET_NAME="t3" #to do DATAset Name
+OUT_PUT_DIR="${PROJECT_ROOT}/output/${DATASET_NAME}" #所有的输出的头目录
+GPUS=(0)
 # ========== VAD ==========
 CONDA_ENV_VAD="/Work21/2025/yanjiahao/conda-envs/Huawei_Encoder_Vad"
 VAD_PIPELINE_PY="${PROJECT_ROOT}/vad/vad_pipeline.py"
-VAD_INPUT_ROOT="/CDShare3/Huawei_Encoder_Proj/codes/jiahao/datas/common_voice_150h/wavs_wav16k"      #to do 输入文件
-VAD_OUT_JSON="${OUT_PUT_DIR}/vad_output/${DATASET_NAME}_silero_vad_segments_mp_Ordered.json"  #to do VAD文件输出
-VAD_MIN_DUR="0.75"
+VAD_INPUT_ROOT="/CDShare3/Huawei_Encoder_Proj/codes/jiahao/BAC009S0768W0205_0.wav"      #to do 输入文件
+VAD_OUT_JSON="${OUT_PUT_DIR}/vad_output/${DATASET_NAME}_silero_vad_segments_mp_Ordered.json"  #VAD文件输出
+VAD_MIN_DUR="3.0"
 VAD_NUM_WORKERS="32"
-VAD_MAX_FILES="35000"   #  todo 空=全量；例如 1000
+VAD_MAX_FILES="400"   #  todo 空=全量；例如 1000
 
 # ========== DNSMOS ==========
 DNSMOS_DIR="${PROJECT_ROOT}/dns_mos"
 DNSMOS_DOCKER_IMAGE="dnsmos_gpu:cuda118"
-DNSMOS_SAVE_HOME="${OUT_PUT_DIR}/dnsmos_output"       #to do 第一步存储的位置后续都要从这里读
+DNSMOS_SAVE_HOME="${OUT_PUT_DIR}/dnsmos_output"       #第一步存储的位置后续都要从这里读
 DNSMOS_INPUT_LENGTH="9"
 DNSMOS_MIN_DUR="1.0"
 DNSMOS_GPUS=("${GPUS[@]}")
 DNSMOS_MERGED_TSV="${DNSMOS_SAVE_HOME}/dns_from_vad_all.json_order.tsv"
 
 # ========== DNSMOS 过滤 ==========
-DNSMOS_FILTERED_TSV="${DNSMOS_SAVE_HOME}/dns_filtered_q70.tsv"
-DNSMOS_FILTER_MIN_DUR="2.0"
-DNSMOS_FILTER_MAX_DUR="20.0"
-DNSMOS_KEEP_QUANTILE="0.7"   # 保留 top 70% by mos_ovr；不想用分位数可自己改脚本参数
+DNSMOS_FILTERED_TSV="${DNSMOS_SAVE_HOME}/dns_filtered_emilia.tsv"
+
+# 对齐 Emilia：3~30 秒窗口
+DNSMOS_FILTER_MIN_DUR="3.0"
+DNSMOS_FILTER_MAX_DUR="30.0"
+
+# 对齐 Emilia：固定底线
+DNSMOS_MIN_MOS_OVR="2.25"
+DNSMOS_MIN_MOS_SIG="2.2"
+DNSMOS_MIN_MOS_BAK="3.8"
+
+# !!! 对齐 Emilia：不要用 quantile（留空=不传参）
+DNSMOS_KEEP_QUANTILE=""
+# 如果你非要保留相对筛选（不推荐对齐 Emilia），再把它改成 "0.7"
+# DNSMOS_KEEP_QUANTILE="0.7"
 
 # ========== Speaker 一致性 ==========
 
@@ -68,7 +79,7 @@ SPEAKER_MIN_SIM_FILE="0.65"
 # ========== Language ID 过滤 ==========
 CONDA_ENV_LID="/Work21/2025/yanjiahao/conda-envs/spk_consistency"  # env
 LANG_DIR="${PROJECT_ROOT}/language_filter"
-LANG_IN_TSV="${SPEAKER_OUT_TSV}"
+LANG_IN_TSV=""
 LANG_OUT_SCORES="${DNSMOS_SAVE_HOME}/lang_scores_all.tsv"
 LANG_OUT_FILTERED="${DNSMOS_SAVE_HOME}/lang_filtered.tsv"
 LANG_CACHE_DB="${DNSMOS_SAVE_HOME}/lang_cache.sqlite"
@@ -89,7 +100,7 @@ WHISPER_SEG_JSON="${LANG_SEG_JSON}"
 WHISPER_OUT_PREFIX="${OUT_PUT_DIR}/whisper_lv3_output/${DATASET_NAME}"    #to do asrout地址/name前缀
 WHISPER_GPUS=("${GPUS[@]}")
 WHISPER_BATCH_SIZE="16"
-WHISPER_MAX_FILES="35000"   # 空=全量；例如 1000
+WHISPER_MAX_FILES=""   # 空=全量；例如 1000
 
 # ========== 执行开关（想跳过某步就改成 0） ==========
 DO_VAD=1
@@ -302,22 +313,38 @@ else
 fi
 
 # ---------- Step 3: filter_dnsmos_tsv.py ----------
-if [[ "$DO_DNSMOS_FILTER" -eq 1 ]]; then
+if [[ "${DO_DNSMOS_FILTER:-0}" -eq 1 ]]; then
   need_file "${DNSMOS_MERGED_TSV}"
   if ! maybe_skip "${DNSMOS_FILTERED_TSV}" "DNSMOS_FILTER"; then
     log "[RUN] Filter DNSMOS -> ${DNSMOS_FILTERED_TSV}"
     pushd "${DNSMOS_DIR}" >/dev/null
-    python3 filter_dnsmos_tsv.py \
-      --in_tsv "${DNSMOS_MERGED_TSV}" \
-      --out_tsv "${DNSMOS_FILTERED_TSV}" \
-      --min_dur "${DNSMOS_FILTER_MIN_DUR}" --max_dur "${DNSMOS_FILTER_MAX_DUR}" \
-      --keep_quantile "${DNSMOS_KEEP_QUANTILE}"
+
+    if [[ -n "${DNSMOS_KEEP_QUANTILE:-}" ]]; then
+      # 启用 quantile（可选）
+      python3 filter_dnsmos_tsv.py \
+        --in_tsv "${DNSMOS_MERGED_TSV}" \
+        --out_tsv "${DNSMOS_FILTERED_TSV}" \
+        --min_dur "${DNSMOS_FILTER_MIN_DUR}" --max_dur "${DNSMOS_FILTER_MAX_DUR}" \
+        --min_mos_ovr "${DNSMOS_MIN_MOS_OVR}" \
+        --min_mos_sig "${DNSMOS_MIN_MOS_SIG}" \
+        --min_mos_bak "${DNSMOS_MIN_MOS_BAK}" \
+        --keep_quantile "${DNSMOS_KEEP_QUANTILE}"
+    else
+      # 对齐 Emilia：不用 quantile，只用固定硬门槛
+      python3 filter_dnsmos_tsv.py \
+        --in_tsv "${DNSMOS_MERGED_TSV}" \
+        --out_tsv "${DNSMOS_FILTERED_TSV}" \
+        --min_dur "${DNSMOS_FILTER_MIN_DUR}" --max_dur "${DNSMOS_FILTER_MAX_DUR}" \
+        --min_mos_ovr "${DNSMOS_MIN_MOS_OVR}" \
+        --min_mos_sig "${DNSMOS_MIN_MOS_SIG}" \
+        --min_mos_bak "${DNSMOS_MIN_MOS_BAK}"
+    fi
+
     popd >/dev/null
   fi
 else
   log "[SKIP] DNSMOS_FILTER (DO_DNSMOS_FILTER=0)"
 fi
-
 # ---------- Step 4: Speaker consistency ----------
 if [[ "$DO_SPEAKER" -eq 1 ]]; then
   need_file "${SPEAKER_IN_TSV}"
@@ -349,6 +376,15 @@ fi
 
 # ---------- Step 5: Language ID filter + tsv->segments.json ----------
 if [[ "$DO_LID" -eq 1 ]]; then
+  # === 动态选择 LID 输入：有 speaker 就用 speaker 输出；否则用 dnsmos filtered ===
+  if [[ "$DO_SPEAKER" -eq 1 ]]; then
+    LANG_IN_TSV="${SPEAKER_OUT_TSV}"
+  else
+    LANG_IN_TSV="${DNSMOS_FILTERED_TSV}"
+    log "[INFO] DO_SPEAKER=0, LangID will use DNSMOS_FILTERED_TSV as input: ${LANG_IN_TSV}"
+  fi
+
+  
   need_file "${LANG_IN_TSV}"
   if ! maybe_skip "${LANG_SEG_JSON}" "LANG_ID + TSV2SEG"; then
     log "[RUN] LangID -> ${LANG_OUT_FILTERED}  and segments -> ${LANG_SEG_JSON}"
