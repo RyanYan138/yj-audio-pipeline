@@ -3,7 +3,7 @@ set -euo pipefail
 umask 0000
 
 ############################################
-# YJ 音频清洗流程
+# YJ 音频清洗流程（用户版，不依赖 cache 变量）
 #
 # 使用的镜像：
 #   1) yj-pipeline-runtime:with-spk   -> VAD / 合并 / 过滤 / LID / Whisper
@@ -27,9 +27,9 @@ FORCE=1
 # 项目根目录（代码目录）
 PROJECT_ROOT="/Work21/2025/yanjiahao/YJ-audio-pipeline/yj-audio-pipeline"
 
-# 需要挂载进容器的两个大目录,尽量往大了挂算了
-WORK_MOUNT_ROOT="/Work21"  #工作目录的最大上级
-DATA_MOUNT_ROOT="/CDShare3" #数据集所在之处
+# 需要挂载进容器的两个大目录
+WORK_MOUNT_ROOT="/Work21"   # 工作目录 / 模型目录通常都在这里
+DATA_MOUNT_ROOT="/CDShare3" # 数据目录通常在这里
 
 # 本次实验/输出名称
 DATASET_NAME="test4hw"
@@ -43,7 +43,7 @@ RUNTIME_IMAGE="yj-pipeline-runtime:with-spk"
 # DNSMOS 专用镜像
 DNSMOS_DOCKER_IMAGE="dnsmos_gpu:cuda118"
 
-# 主流程用到的 GPU（VAD 本身通常不需要 GPU；Whisper 用这里）
+# 主流程用到的 GPU（Whisper 用这里）
 PIPELINE_GPUS=(0)
 
 # DNSMOS 打分用到的 GPU
@@ -52,12 +52,12 @@ DNSMOS_GPUS=(0)
 # LID 单独绑定的 GPU
 LID_GPU=0
 
-# 宿主机上的缓存/模型目录（会原路径挂载进容器）
-HF_HOME_HOST="/Work21/2025/yanjiahao/hf_cache"
-TORCH_HOME_HOST="/Work21/2025/yanjiahao/torch_cache"
-MODELSCOPE_CACHE_HOST="/Work21/2025/yanjiahao/modelscope_cache"
-WHISPER_MODEL_DIR_HOST="/Work21/2025/yanjiahao/modelscope_cache/models/AI-ModelScope/whisper-large-v3"      #whisper的权重位置
-LID_MODEL_DIR_HOST="/Work21/2025/yanjiahao/hf_cache/models--Systran--faster-whisper-large-v3/snapshots/edaa852ec7e145841d8ffdb056a99866b5f0a478" #做lang id的权重的位置
+# 直接填写模型目录（不依赖 HF / Torch / ModelScope cache 变量）
+# Whisper 用的本地模型目录（transformers / modelscope 版本）
+WHISPER_MODEL_DIR_HOST="/Work21/2025/yanjiahao/modelscope_cache/models/AI-ModelScope/whisper-large-v3"
+
+# LID 用的本地 faster-whisper 模型目录
+LID_MODEL_DIR_HOST="/Work21/2025/yanjiahao/hf_cache/models--Systran--faster-whisper-large-v3/snapshots/edaa852ec7e145841d8ffdb056a99866b5f0a478"
 
 # 各步骤开关：1=执行，0=跳过
 DO_VAD=1
@@ -100,7 +100,7 @@ DNSMOS_KEEP_QUANTILE=""   # 留空表示不用 quantile
 LANG_DIR="${PROJECT_ROOT}/language_filter"
 LANG_OUT_SCORES="${DNSMOS_SAVE_HOME}/lang_scores_all.tsv"
 LANG_OUT_FILTERED="${DNSMOS_SAVE_HOME}/lang_filtered.tsv"
-LANG_CACHE_DB="${DNSMOS_SAVE_HOME}/lang_cache.sqlite"
+LANG_CACHE_DB="${DNSMOS_SAVE_HOME}/lang_cache.sqlite"   # 这是结果缓存，不是模型 cache
 LANG_MODEL_ID="${LID_MODEL_DIR_HOST}"
 LANG_DEVICE="cuda"
 LANG_COMPUTE_TYPE="float16"
@@ -146,10 +146,7 @@ ensure_dirs() {
   mkdir -p \
     "${OUTPUT_ROOT}/vad_output" \
     "${OUTPUT_ROOT}/whisper_lv3_output" \
-    "${DNSMOS_SAVE_HOME}" \
-    "${HF_HOME_HOST}" \
-    "${TORCH_HOME_HOST}" \
-    "${MODELSCOPE_CACHE_HOST}"
+    "${DNSMOS_SAVE_HOME}"
 
   chmod -R a+rwX "${OUTPUT_ROOT}" 2>/dev/null || true
 }
@@ -174,15 +171,7 @@ docker_run_runtime() {
       -v "${WORK_MOUNT_ROOT}:${WORK_MOUNT_ROOT}" \
       -v "${DATA_MOUNT_ROOT}:${DATA_MOUNT_ROOT}" \
       -v "${PROJECT_ROOT}:${PROJECT_ROOT}" \
-      -v "${HF_HOME_HOST}:${HF_HOME_HOST}" \
-      -v "${TORCH_HOME_HOST}:${TORCH_HOME_HOST}" \
-      -v "${MODELSCOPE_CACHE_HOST}:${MODELSCOPE_CACHE_HOST}" \
       -w "${PROJECT_ROOT}" \
-      -e HF_HOME="${HF_HOME_HOST}" \
-      -e TORCH_HOME="${TORCH_HOME_HOST}" \
-      -e TRANSFORMERS_CACHE="${HF_HOME_HOST}" \
-      -e HUGGINGFACE_HUB_CACHE="${HF_HOME_HOST}/hub" \
-      -e MODELSCOPE_CACHE="${MODELSCOPE_CACHE_HOST}" \
       "${RUNTIME_IMAGE}" \
       bash -lc "umask 0000; ${cmd}"
   else
@@ -192,15 +181,7 @@ docker_run_runtime() {
       -v "${WORK_MOUNT_ROOT}:${WORK_MOUNT_ROOT}" \
       -v "${DATA_MOUNT_ROOT}:${DATA_MOUNT_ROOT}" \
       -v "${PROJECT_ROOT}:${PROJECT_ROOT}" \
-      -v "${HF_HOME_HOST}:${HF_HOME_HOST}" \
-      -v "${TORCH_HOME_HOST}:${TORCH_HOME_HOST}" \
-      -v "${MODELSCOPE_CACHE_HOST}:${MODELSCOPE_CACHE_HOST}" \
       -w "${PROJECT_ROOT}" \
-      -e HF_HOME="${HF_HOME_HOST}" \
-      -e TORCH_HOME="${TORCH_HOME_HOST}" \
-      -e TRANSFORMERS_CACHE="${HF_HOME_HOST}" \
-      -e HUGGINGFACE_HUB_CACHE="${HF_HOME_HOST}/hub" \
-      -e MODELSCOPE_CACHE="${MODELSCOPE_CACHE_HOST}" \
       "${RUNTIME_IMAGE}" \
       bash -lc "umask 0000; ${cmd}"
   fi
@@ -341,7 +322,6 @@ if [[ "$DO_LID" -eq 1 ]]; then
   if ! maybe_skip "${LANG_SEG_JSON}" "LANG_ID + TSV2SEG"; then
     log "[RUN] LangID -> ${LANG_OUT_FILTERED}"
 
-    # 这里显式使用塞进镜像的 spk_consistency 环境
     docker_run_runtime "device=${LID_GPU}" \
       "/opt/envs/spk_consistency/bin/python '${LANG_DIR}/lang_id_filter.py' \
         --in_tsv '${DNSMOS_FILTERED_TSV}' \

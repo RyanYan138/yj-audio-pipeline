@@ -1,206 +1,306 @@
+
+
+---
+
+# README
+
+````md
 # yj-audio-pipeline
-语音数据处理管线
-一个“一键式”音频数据处理与转写管线，用于把一批原始音频从切分( VAD )、客观质量打分( DNSMOS )、质量过滤、说话人一致性过滤、语种过滤到多卡 Whisper 转写串起来跑完，并把中间产物都落盘，便于复现实验与调参。
 
-Pipeline 做了什么
+一个用于语音数据清洗与转写的工程化 Pipeline。  
+它可以把一批原始音频按以下顺序串起来执行：
 
-整体步骤如下（和 run_all.bash 对齐）：
+1. VAD 切段  
+2. DNSMOS 打分  
+3. DNSMOS 过滤  
+4. 语种过滤（LID）  
+5. Whisper 多卡转写  
 
-VAD（Silero VAD）：扫描输入目录下音频，切出语音片段，输出 segments.json
+中间结果会落盘，方便复现实验、观察每一步输出以及后续调参。
 
-DNSMOS（Docker 多 GPU）：对 VAD 片段做 DNSMOS 质量打分，输出分片 TSV（shard）
+---
 
-Merge DNSMOS shards：按 VAD json 的顺序把 shard TSV 合并成一个总 TSV
+## 这个仓库面向两类人
 
-DNSMOS 过滤：按时长 + 分位数/阈值过滤低质量片段
+### 1. 普通使用者
+如果你只是想**把流程跑起来**，不关心内部实现细节，也不准备自己改代码：
 
-Speaker Consistency：基于说话人 embedding 做一致性过滤（带 sqlite cache）
+**只需要使用 `run_all4user.bash`。**
 
-Language ID 过滤：过滤出目标语种（如 en），并生成 Whisper 输入用的 segments json
+你不需要研究其他 `run_all*.bash` 文件，也不需要关心我本地调试时用过的其他运行脚本。  
+那些脚本主要是为了我自己做实验、调参数和优化流程保留的，不建议普通使用者直接修改或使用。
 
-Whisper 多卡 ASR：按 shard 切分 segments，多 GPU 并行转写，最后 merge 成一个总 JSON
+### 2. 开发 / 调优使用者
+如果你需要：
+- 调整阈值
+- 修改流程顺序
+- 更换模型
+- 研究中间脚本实现
 
-VAD 这一步用的是 silero-vad 包里提供的 load_silero_vad / read_audio / get_speech_timestamps 这套接口。
+那再去看仓库里的其他运行脚本和子目录代码。
 
-目录结构（约定）
+---
 
-通常你仓库里会是类似这样（按你现在的脚本路径写）：
+## Pipeline 做了什么
 
-run_all.bash：一键总入口（强烈建议只改顶部配置区）
+完整流程如下：
 
+1. **VAD（Silero VAD）**  
+   扫描输入目录中的音频，切出语音片段，输出 `segments.json`
 
-vad/
+2. **DNSMOS（Docker 多 GPU）**  
+   对 VAD 片段进行客观质量打分，输出多个 shard TSV
 
-vad_pipeline.py：Silero VAD 多进程切分
+3. **Merge DNSMOS shards**  
+   按 VAD JSON 的顺序，把 DNSMOS shard 合并成一个总 TSV
 
+4. **DNSMOS 过滤**  
+   按时长与阈值过滤掉低质量片段
 
-dns_mos/
+5. **Language ID（LID）**  
+   过滤出目标语言，并生成 Whisper 输入所需的 `segments json`
 
-eval_dns_from_vad_json.py：对 segments.json 打 DNSMOS
+6. **Whisper 多卡 ASR**  
+   对过滤后的片段做多卡转写，最后 merge 成总 JSON
 
-merge_dns_by_json_order.py：按 json 顺序 merge shards
+---
 
-filter_dnsmos_tsv.py：按阈值/分位数过滤
+## Quick Start（普通用户只看这一节）
 
+### 第一步：找我拿两个 Docker 镜像
 
-spk/
+当前推荐的运行方式是 **Docker 双镜像方案**。  
+你需要先拿到这两个镜像：
 
-speaker_consistency_filter.py：说话人一致性过滤 + cache
+- `yj-pipeline-runtime:with-spk`
+- `dnsmos_gpu:cuda118`
 
-language_filter/
+我提供的使用说明里也是先导入这两个镜像，再使用脚本运行。:contentReference[oaicite:2]{index=2}
 
-lang_id_filter.py：语种识别与过滤
+导入方式示例：
 
-tsv_to_segments_json.py：把过滤后的 TSV 转回 Whisper segments.json（你之前报错就是缺它）
+```bash
+gzip -dc /你的路径/yj-pipeline-runtime_with-spk.tar.gz | docker load
+gzip -dc /你的路径/dnsmos_gpu_cuda118.tar.gz | docker load
+````
 
+导入完成后可以检查：
 
-asr/
+```bash
+docker images | egrep "yj-pipeline-runtime|dnsmos_gpu"
+```
 
-whisper_ms_from_segments.py：Whisper 多卡分片转写
+---
 
-merge_whisper_shards.py：merge shard 输出
+### 第二步：拉代码
 
-output/：最终/中间输出（可自定义）
-
-
-依赖与环境
-
-Linux + bash
-
-NVIDIA GPU + 驱动（DNSMOS / Whisper / 部分过滤步骤会用到 GPU）
-
-Docker（DNSMOS 通过 docker 跑）
-
-多个 Conda 环境（你在脚本里用的是绝对路径，比如）
-
-Huawei_Encoder_Vad
-
-spk_consistency
-
-asr_whisper
-
-快速开始（只建议改配置区）
-1）克隆仓库
+```bash
 git clone git@github.com:RyanYan138/yj-audio-pipeline.git
 cd yj-audio-pipeline
+```
 
-2）编辑 run_all.bash 顶部配置区
+我之前给的使用说明里也是这一步：从 GitHub 拉代码后，在目录里找到运行脚本并修改配置区。
 
-你主要会改这些：
+---
 
-PROJECT_ROOT：项目根目录
+### 第三步：只修改 `run_all4user.bash` 顶部配置区
 
-VAD_INPUT_ROOT：输入音频根目录
+普通使用者只需要打开：
 
-VAD_MAX_FILES：调试时限制处理数量（空=全量；填数字=只跑前 N 个）
+```bash
+run_all4user.bash
+```
 
-DNSMOS_GPUS=(...)、WHISPER_GPUS=(...)：指定用哪些 GPU
+然后只修改最上面的配置区。
 
-FORCE=1/0：是否强制覆盖重跑（你想覆盖就设 1）
+你主要会改这些内容：
 
-DO_VAD / DO_DNSMOS / ...：想跳过某步就设 0
+* 项目目录
+* 数据目录
+* 输出实验名
+* GPU 编号
+* 模型权重目录
+* 镜像名（如果你导入后镜像名没变，一般不用改）
 
-3）一键运行
-bash run_all.bash
+你给用户使用的脚本本质上就是：
+把两个镜像名、GPU、Whisper 模型路径和 LID 模型路径都集中放在顶部配置区。现有脚本里这些关键配置本来就集中在前面，比如镜像名、GPU、Whisper 模型目录和 LID 模型目录。
+
+例如你需要重点改这些：
+
+```bash
+PROJECT_ROOT="/你的项目目录"
+WORK_MOUNT_ROOT="/Work21"
+DATA_MOUNT_ROOT="/CDShare3"
+
+DATASET_NAME="你的实验名字"
+INPUT_ROOT="/你的输入音频目录"
+
+RUNTIME_IMAGE="yj-pipeline-runtime:with-spk"
+DNSMOS_DOCKER_IMAGE="dnsmos_gpu:cuda118"
+
+PIPELINE_GPUS=(0)
+DNSMOS_GPUS=(0)
+LID_GPU=0
+
+WHISPER_MODEL_DIR_HOST="/你的whisper模型目录"
+LID_MODEL_DIR_HOST="/你的LID模型目录"
+```
+
+其中：
+
+* Whisper 这一步本来就是通过 `--model_dir` 读取本地模型目录。
+* LID 这一步会把 `LANG_MODEL_ID` 传给 `lang_id_filter.py`。
+
+---
+
+### 第四步：直接运行
+
+改完配置后，直接执行：
+
+```bash
+bash run_all4user.bash
+```
+
+就可以按顺序跑完整流程。
+
+---
+
+## 普通用户需要改哪些地方
+
+对普通用户来说，通常只需要改：
+
+1. **项目目录**
+2. **输入音频目录**
+3. **实验输出名**
+4. **GPU 编号**
+5. **Whisper 模型目录**
+6. **LID 模型目录**
+7. **镜像名（如果导入后名字变了才改）**
+
+我的使用说明文档里也明确提到：
+用户主要就是改目录、数据位置和模型权重位置，镜像名字如果没变则不用改。
+
+---
+
+## 哪个脚本给普通用户用
+
+### 推荐脚本
+
+```bash
+run_all4user.bash
+```
+
+这个脚本是给普通用户准备的“直接运行版”。
+
+### 不推荐普通用户使用的脚本
+
+其他 `run_all*.bash`、调试脚本、实验脚本，主要用于：
+
+* 我自己本地调试
+* 对不同阶段做参数优化
+* 做消融实验
+* 修改流程逻辑
+
+如果你只是想部署并运行，不需要碰它们。
+
+---
+
+## 目录结构说明
+
+仓库核心目录大致如下：
+
+```text
+vad/
+dns_mos/
+language_filter/
+asr/
+output/
+run_all4user.bash
+```
+
+其中：
+
+* `vad/`：VAD 切段
+* `dns_mos/`：DNSMOS 打分、合并、过滤
+* `language_filter/`：语种识别与过滤
+* `asr/`：Whisper 转写与合并
+* `output/`：输出目录
+* `run_all4user.bash`：给普通用户直接跑的脚本
+
+---
+
+## 输出结果
+
+脚本跑完后，会在输出目录下生成一系列中间文件和最终文件，例如：
+
+* VAD 输出 JSON
+* DNSMOS 合并后的 TSV
+* DNSMOS 过滤结果
+* 语言过滤后的 TSV
+* 语言过滤后的 segments JSON
+* Whisper 最终转写结果 JSON
+
+LID 和 Whisper 这两步在脚本中分别对应：
+
+* `lang_id_filter.py`
+* `whisper_ms_from_segments.py` + `merge_whisper_shards.py`。 
+
+---
+
+## 运行环境要求
+
+建议在以下环境运行：
+
+* Linux
+* NVIDIA GPU
+* Docker
+* 已正确配置的 GPU Docker 环境
+
+当前普通用户方案是 **双镜像运行**，不要求用户自己手动配置 Conda 环境。镜像导入后，直接通过脚本调用即可。你给的使用文档也是基于“先导入镜像，再改配置，再运行”的流程。
+
+---
+
+## 常见问题
+
+### 1. 我只想直接跑，不想研究代码
+
+只看 `Quick Start`，只用 `run_all4user.bash`。
+
+### 2. 其他 run_all 脚本是做什么的
+
+它们主要是我自己做实验、调试、优化流程时用的，不是给普通用户直接部署用的。
+
+### 3. 我需要自己配 Python 环境吗
+
+普通用户方案不需要手动配完整环境，直接用我提供的 Docker 镜像即可。
+
+### 4. 我需要改很多参数吗
+
+不需要。普通用户通常只要改：
+
+* 目录
+* 数据位置
+* 模型位置
+* GPU
+* 输出实验名
+
+这也是我给出的使用说明中的核心要求。
+
+---
+
+## 说明
+
+这个仓库既包含“普通用户部署运行”的入口，也保留了我自己做实验和优化时使用的工程脚本。
+如果你的目标只是**部署并跑起来**，请优先使用：
+
+```bash
+run_all4user.bash
+```
+
+不要直接修改其他运行脚本，除非你知道自己在做什么。
+
+```
+
+---
 
 
-跑完你会得到一串关键产物（脚本最后也会打印）：
-
-VAD_OUT_JSON
-
-DNSMOS_MERGED_TSV
-
-DNSMOS_FILTERED_TSV
-
-SPEAKER_OUT_TSV
-
-LANG_OUT_FILTERED
-
-LANG_SEG_JSON
-
-WHISPER_FINAL_JSON
-
-常用操作
-只跑某一步 / 跳过某一步
-
-例如只想从 Speaker 开始跑：
-
-DO_VAD=0
-
-DO_DNSMOS=0
-
-DO_DNSMOS_FILTER=0
-
-DO_SPEAKER=1
-
-后面保持 1
-
-调试模式：只跑前 N 个文件
-
-把 VAD_MAX_FILES=100（或更小）即可。空字符串表示全量。
-
-这次遇到的两个关键坑
-坑 1：DNSMOS merge 把 “merged 文件自己”也当成 shard 读进去了
-
-你日志里出现了：
-
-“Found shard files” 里包含了 dns_from_vad_all.json_order.tsv
-
-这会导致 merge 行为异常（甚至读到 0 行），因为 merge 输入应该只包含 dns_from_vad_0_2.tsv / dns_from_vad_1_2.tsv ... 这类 shard 文件。
-
-最简单的规避方式：把 merged 输出放到单独子目录，避免 glob/扫描时把它也匹配进去，例如：
-
-DNSMOS_MERGED_DIR="${DNSMOS_SAVE_HOME}/merged"
-DNSMOS_MERGED_TSV="${DNSMOS_MERGED_DIR}/dns_from_vad_all.json_order.tsv"
-
-
-并在 ensure_dirs() 里加：
-
-mkdir -p "${DNSMOS_MERGED_DIR}"
-
-
-这样 merge 脚本扫 shard 文件时就不会“误把 merged 当输入”。
-
-坑 2：集群/网络封了 SSH 22 端口，GitHub 只能走 443
-
-你一开始 ssh -T git@github.com 报 Permission denied (publickey)，但配置成走 443 后成功了。
-
-原因：很多学校/集群出口会限制 22 端口；GitHub 官方支持把 SSH 走到 ssh.github.com:443。
-
-你现在这种写法就可以（重点是 Host 还是 github.com，所以测试依然用 ssh -T git@github.com）：
-
-Host github.com
-  HostName ssh.github.com
-  User git
-  Port 443
-  IdentityFile ~/.ssh/id_ed25519
-  IdentitiesOnly yes
-
-
-你之前 ssh -T github.com-443 报错是正常的：你并没有配置 Host github.com-443 这个别名，所以它解析不了。
-
-Git 使用小抄（含“删除文件没同步”的原因）
-
-你遇到的现象：删除了 setup.bash，但提交后远端还在。
-
-原因是你用了 git add .，它在你的 Git 版本里默认不会记录“删除”（你也看到了那段 warning）。
-
-
-正确做法二选一：
-
-方式 A（推荐）：用 git add -A（会包含新增/修改/删除）
-
-git add -A
-git commit -m "remove setup.bash"
-git push
-
-
-方式 B：显式告诉 git 这是删除
-
-git rm setup.bash
-git commit -m "remove setup.bash"
-git push
-
-许可证 / 说明
-
-本仓库主要是工程脚本编排与数据处理 glue code；VAD/DNSMOS/Whisper 等模型与实现分别遵循各自项目的许可与使用规范（你在生产/发布前建议把各组件 license 统一核对一遍）。
