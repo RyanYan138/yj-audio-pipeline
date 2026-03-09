@@ -1,0 +1,15 @@
+numpy==2.2.6
+scipy==1.15.3
+soundfile==0.13.1
+silero-vad==6.2.0
+faster-whisper==1.2.1
+transformers==4.57.1
+modelscope==1.31.0
+huggingface-hub==0.36.0
+sentencepiece==0.2.1
+safetensors==0.6.2
+requests==2.32.5
+urllib3==2.6.3
+idna==3.11
+certifi==2026.1.4
+charset-normalizer==3.4.4

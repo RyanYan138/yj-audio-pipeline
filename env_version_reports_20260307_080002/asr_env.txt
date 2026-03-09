@@ -1,0 +1,43 @@
+===== ASR ENV: basic =====
+aliyun-python-sdk-core      2.16.0           pypi_0                pypi
+aliyun-python-sdk-kms       2.16.5           pypi_0                pypi
+antlr4-python3-runtime      4.9.3            pypi_0                pypi
+huggingface-hub             0.36.0           pypi_0                pypi
+libsentencepiece            0.2.1            h022d5ca_0            conda-forge
+modelscope                  1.31.0           pypi_0                pypi
+numpy                       2.2.6            py310hefbff90_0       conda-forge
+python                      3.10.19          h3c07f61_2_cpython    conda-forge
+python_abi                  3.10             8_cp310               conda-forge
+pytorch-wpe                 0.0.1            pypi_0                pypi
+safetensors                 0.6.2            pypi_0                pypi
+scipy                       1.15.3           pypi_0                pypi
+sentencepiece               0.2.1            h7197b3e_0            conda-forge
+sentencepiece-python        0.2.1            py310he011bb3_0       conda-forge
+sentencepiece-spm           0.2.1            h022d5ca_0            conda-forge
+soundfile                   0.13.1           pypi_0                pypi
+soxr                        0.1.3            h0b41bf4_3            conda-forge
+soxr-python                 1.0.0            py310hea6c23e_0       conda-forge
+torch                       2.6.0            pypi_0                pypi
+torch-complex               0.4.4            pypi_0                pypi
+torchaudio                  2.6.0            pypi_0                pypi
+transformers                4.57.1           pypi_0                pypi
+
+===== ASR ENV: python import =====
+/Work21/2025/yanjiahao/conda-envs/asr_whisper/lib/python3.10/site-packages/transformers/utils/hub.py:110: FutureWarning: Using `TRANSFORMERS_CACHE` is deprecated and will be removed in v5 of Transformers. Use `HF_HOME` instead.
+  warnings.warn(
+python: 3.10.19 | packaged by conda-forge | (main, Oct 22 2025, 22:29:10) [GCC 14.3.0]
+torch: 2.6.0+cu124
+torchaudio: 2.6.0+cu124
+numpy: 2.2.6
+scipy: 1.15.3
+soundfile: 0.13.1
+transformers: 4.57.1
+modelscope: 1.31.0
+sentencepiece: 0.2.1
+safetensors: 0.6.2
+
+===== ASR ENV: ffmpeg/sox =====
+ffmpeg path: /usr/bin/ffmpeg
+ffmpeg version 2.8.15 Copyright (c) 2000-2018 the FFmpeg developers
+sox path: /usr/bin/sox
+sox:      SoX v14.4.1

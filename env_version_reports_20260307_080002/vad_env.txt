@@ -1,0 +1,22 @@
+===== VAD ENV: basic =====
+numpy                       2.2.6            pypi_0              pypi
+python                      3.10.19          h3c07f61_2_cpython  conda-forge
+silero-vad                  6.2.0            pypi_0              pypi
+soundfile                   0.13.1           pypi_0              pypi
+torch                       2.6.0            pypi_0              pypi
+torchaudio                  2.6.0            pypi_0              pypi
+
+===== VAD ENV: python import =====
+python: 3.10.19 | packaged by conda-forge | (main, Oct 22 2025, 22:29:10) [GCC 14.3.0]
+torch: 2.6.0+cu124
+torchaudio: 2.6.0+cu124
+numpy: 2.2.6
+scipy: IMPORT_FAIL -> No module named 'scipy'
+soundfile: 0.13.1
+silero_vad: 6.2.0
+
+===== VAD ENV: ffmpeg/sox =====
+ffmpeg path: /usr/bin/ffmpeg
+ffmpeg version 2.8.15 Copyright (c) 2000-2018 the FFmpeg developers
+sox path: /usr/bin/sox
+sox:      SoX v14.4.1

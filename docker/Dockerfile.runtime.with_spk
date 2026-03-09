@@ -1,0 +1,13 @@
+FROM yj-pipeline-runtime:cu118
+
+ENV SPK_ENV_DIR=/opt/envs/spk_consistency
+
+COPY yj_pipeline_bundle_20260307_1010/envs/spk_consistency.tar.gz /tmp/spk_consistency.tar.gz
+
+RUN ln -sf /usr/bin/python3 /usr/bin/python && \
+    mkdir -p /opt/envs/spk_consistency && \
+    tar -xzf /tmp/spk_consistency.tar.gz -C /opt/envs/spk_consistency && \
+    rm -f /tmp/spk_consistency.tar.gz && \
+    /opt/envs/spk_consistency/bin/conda-unpack
+
+WORKDIR /workspace

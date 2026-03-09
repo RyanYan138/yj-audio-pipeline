@@ -27,7 +27,7 @@ GPUS=(0)
 # ========== VAD ==========
 CONDA_ENV_VAD="/Work21/2025/yanjiahao/conda-envs/Huawei_Encoder_Vad"
 VAD_PIPELINE_PY="${PROJECT_ROOT}/vad/vad_pipeline.py"
-VAD_INPUT_ROOT="/CDShare3/Huawei_Encoder_Proj/codes/jiahao/BAC009S0768W0205_0.wav"      #to do 输入文件
+VAD_INPUT_ROOT="/CDShare3/Huawei_Encoder_Proj/datas/LibriSpeech/dev-clean/84"      #to do 输入文件
 VAD_OUT_JSON="${OUT_PUT_DIR}/vad_output/${DATASET_NAME}_silero_vad_segments_mp_Ordered.json"  #VAD文件输出
 VAD_MIN_DUR="3.0"
 VAD_NUM_WORKERS="32"
