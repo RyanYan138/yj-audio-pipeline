@@ -32,10 +32,10 @@ WORK_MOUNT_ROOT="/Work21"   # 工作目录 / 模型目录通常都在这里
 DATA_MOUNT_ROOT="/CDShare3" # 数据目录通常在这里
 
 # 本次实验/输出名称
-DATASET_NAME="test4hw"
+DATASET_NAME="4hw_wild_datas1"
 
 # 输入音频根目录（可以是一个目录）
-INPUT_ROOT="/CDShare3/Huawei_Encoder_Proj/datas/LibriSpeech/dev-clean/84"
+INPUT_ROOT="/Work21/2026/liangjintao/WavCrawler/wav_segments"
 
 # 主流程镜像：用于 VAD / 合并 / 过滤 / LID / Whisper
 RUNTIME_IMAGE="yj-pipeline-runtime:with-spk"
@@ -44,10 +44,10 @@ RUNTIME_IMAGE="yj-pipeline-runtime:with-spk"
 DNSMOS_DOCKER_IMAGE="dnsmos_gpu:cuda118"
 
 # 主流程用到的 GPU（Whisper 用这里）
-PIPELINE_GPUS=(0)
+PIPELINE_GPUS=(0 1)
 
 # DNSMOS 打分用到的 GPU
-DNSMOS_GPUS=(0)
+DNSMOS_GPUS=(0 1)
 
 # LID 单独绑定的 GPU
 LID_GPU=0
@@ -90,10 +90,10 @@ DNSMOS_MERGED_TSV="${DNSMOS_SAVE_HOME}/dns_from_vad_all.json_order.tsv"
 # ===== DNSMOS 过滤 =====
 DNSMOS_FILTERED_TSV="${DNSMOS_SAVE_HOME}/dns_filtered_emilia.tsv"
 DNSMOS_FILTER_MIN_DUR="3.0"
-DNSMOS_FILTER_MAX_DUR="30.0"
-DNSMOS_MIN_MOS_OVR="2.25"
-DNSMOS_MIN_MOS_SIG="2.2"
-DNSMOS_MIN_MOS_BAK="3.8"
+DNSMOS_FILTER_MAX_DUR="100.0"
+DNSMOS_MIN_MOS_OVR="2.0"
+DNSMOS_MIN_MOS_SIG="2.0"
+DNSMOS_MIN_MOS_BAK="3.5"
 DNSMOS_KEEP_QUANTILE=""   # 留空表示不用 quantile
 
 # ===== 语言识别 LID =====
@@ -112,7 +112,7 @@ LANG_SEG_JSON="${DNSMOS_SAVE_HOME}/lang_filtered_segments.json"
 # ===== Whisper 转写 =====
 ASR_DIR="${PROJECT_ROOT}/asr"
 WHISPER_OUT_PREFIX="${OUTPUT_ROOT}/whisper_lv3_output/${DATASET_NAME}"
-WHISPER_BATCH_SIZE="16"
+WHISPER_BATCH_SIZE="8"
 WHISPER_MAX_FILES=""
 
 ############################
