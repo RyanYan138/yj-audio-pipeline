@@ -1,49 +1,63 @@
 #!/usr/bin/env bash
 set -euo pipefail
-umask 0000
 
 ############################################
-# YJ 音频清洗流程
+# YJ 音频清洗流程（最终版）
 #
 # 使用的镜像：
-#   1) yj-pipeline-runtime:with-spk   -> VAD / 合并 / 过滤 / LID / Whisper
+#   1) yj-pipeline-runtime:with-spk   -> 预处理 / VAD / 合并 / 过滤 / LID / Whisper / 最终导出
 #   2) dnsmos_gpu:cuda118            -> DNSMOS 打分
 #
 # 流程：
+#   0) 预处理：统一采样率 / 声道 / 格式
 #   1) VAD 切段
 #   2) DNSMOS 打分 + 合并
 #   3) DNSMOS 过滤
 #   4) LID 过滤 + TSV 转 segments.json
 #   5) Whisper 多卡转写 + 合并
+#   6) 基于最终 JSON 导出切片音频 + 标注 JSON
 ############################################
 
 ############################
 # 1）用户主要配置区（优先改这里）
 ############################
 
-# 是否强制重跑：1=不管输出是否存在都重跑；0=有输出就跳过
+# 是否强制重跑：1=重跑并清理本次输出；0=有输出就跳过
 FORCE=1
 
 # 项目根目录（代码目录）
 PROJECT_ROOT="/Work21/2025/yanjiahao/YJ-audio-pipeline/yj-audio-pipeline"
 
-# 需要挂载进容器的两个大目录,尽量往大了挂算了
-WORK_MOUNT_ROOT="/Work21"  #工作目录的最大上级
-DATA_MOUNT_ROOT="/CDShare3" #数据集所在之处
+# 需要挂载进容器的两个大目录
+WORK_MOUNT_ROOT="/Work21"
+DATA_MOUNT_ROOT="/CDShare3"
 
 # 本次实验/输出名称
-DATASET_NAME="test4hw"
+DATASET_NAME="4hw_wild_datas1"
 
-# 输入音频根目录（可以是一个目录）
-INPUT_ROOT="/CDShare3/Huawei_Encoder_Proj/datas/LibriSpeech/dev-clean/84"
+# 输出总目录
+OUTPUT_ROOT="/CDShare3/Huawei_Encoder_Proj/datas/YJoutput/${DATASET_NAME}"
 
-# 主流程镜像：用于 VAD / 合并 / 过滤 / LID / Whisper
+# 输入音频根目录（可以是目录，也可以是单文件）
+ INPUT_ROOT="/CDShare3/Huawei_Encoder_Proj/datas/YJoutput/4hw_wild_datas1_v2/_tmp_16k_audio"
+ #"/Work21/2025/yanjiahao/datas/wild_datas1/wav_segments"
+
+# Step 0：是否先统一预处理（1=开，0=关）
+DO_PREPROCESS=1
+
+# 统一预处理参数
+PREPROCESS_TARGET_SR="16000"
+PREPROCESS_CHANNELS="1"      # 1=单声道, 2=双声道
+PREPROCESS_AUDIO_CODEC="pcm_s16le"
+PREPROCESS_EXT="wav"
+
+# 主流程镜像
 RUNTIME_IMAGE="yj-pipeline-runtime:with-spk"
 
 # DNSMOS 专用镜像
 DNSMOS_DOCKER_IMAGE="dnsmos_gpu:cuda118"
 
-# 主流程用到的 GPU（VAD 本身通常不需要 GPU；Whisper 用这里）
+# 主流程用到的 GPU（Whisper 用这里）
 PIPELINE_GPUS=(0)
 
 # DNSMOS 打分用到的 GPU
@@ -52,12 +66,16 @@ DNSMOS_GPUS=(0)
 # LID 单独绑定的 GPU
 LID_GPU=0
 
-# 宿主机上的缓存/模型目录（会原路径挂载进容器）
+# 模型 / cache 目录
 HF_HOME_HOST="/Work21/2025/yanjiahao/hf_cache"
 TORCH_HOME_HOST="/Work21/2025/yanjiahao/torch_cache"
 MODELSCOPE_CACHE_HOST="/Work21/2025/yanjiahao/modelscope_cache"
-WHISPER_MODEL_DIR_HOST="/Work21/2025/yanjiahao/modelscope_cache/models/AI-ModelScope/whisper-large-v3"      #whisper的权重位置
-LID_MODEL_DIR_HOST="/Work21/2025/yanjiahao/hf_cache/models--Systran--faster-whisper-large-v3/snapshots/edaa852ec7e145841d8ffdb056a99866b5f0a478" #做lang id的权重的位置
+
+# Whisper 的权重位置
+WHISPER_MODEL_DIR_HOST="/Work21/2025/yanjiahao/modelscope_cache/models/AI-ModelScope/whisper-large-v3"
+
+# LID 的权重位置（faster-whisper 本地目录）
+LID_MODEL_DIR_HOST="/Work21/2025/yanjiahao/hf_cache/models--Systran--faster-whisper-large-v3/snapshots/edaa852ec7e145841d8ffdb056a99866b5f0a478"
 
 # 各步骤开关：1=执行，0=跳过
 DO_VAD=1
@@ -65,20 +83,24 @@ DO_DNSMOS=1
 DO_DNSMOS_FILTER=1
 DO_LID=1
 DO_WHISPER=1
+DO_EXPORT_FINAL=1
+
+# 是否在最终导出后自动清理中间产物（1=清理，0=保留）
+DO_CLEAN_INTERMEDIATE=1
 
 ############################
 # 2）进阶配置区（一般不用改）
 ############################
 
-# 输出总目录
-OUTPUT_ROOT="${PROJECT_ROOT}/output/${DATASET_NAME}"
+# Step 0：预处理输出目录（临时目录）
+PREPROCESS_OUT_ROOT="${OUTPUT_ROOT}/_tmp_16k_audio"
 
 # ===== VAD =====
 VAD_PIPELINE_PY="${PROJECT_ROOT}/vad/vad_pipeline.py"
 VAD_OUT_JSON="${OUTPUT_ROOT}/vad_output/${DATASET_NAME}_silero_vad_segments_mp_Ordered.json"
 VAD_MIN_DUR="5.0"
 VAD_NUM_WORKERS="32"
-VAD_MAX_FILES="400"
+VAD_MAX_FILES=""
 
 # ===== DNSMOS =====
 DNSMOS_DIR="${PROJECT_ROOT}/dns_mos"
@@ -94,7 +116,7 @@ DNSMOS_FILTER_MAX_DUR="30.0"
 DNSMOS_MIN_MOS_OVR="2.25"
 DNSMOS_MIN_MOS_SIG="2.2"
 DNSMOS_MIN_MOS_BAK="3.8"
-DNSMOS_KEEP_QUANTILE=""   # 留空表示不用 quantile
+DNSMOS_KEEP_QUANTILE=""
 
 # ===== 语言识别 LID =====
 LANG_DIR="${PROJECT_ROOT}/language_filter"
@@ -112,25 +134,35 @@ LANG_SEG_JSON="${DNSMOS_SAVE_HOME}/lang_filtered_segments.json"
 # ===== Whisper 转写 =====
 ASR_DIR="${PROJECT_ROOT}/asr"
 WHISPER_OUT_PREFIX="${OUTPUT_ROOT}/whisper_lv3_output/${DATASET_NAME}"
-WHISPER_BATCH_SIZE="16"
+WHISPER_FINAL_JSON="${WHISPER_OUT_PREFIX}_all.json"
+WHISPER_BATCH_SIZE="8"
 WHISPER_MAX_FILES=""
+
+# ===== 最终导出（切片音频 + 标注 JSON） =====
+FINAL_DATASET_ROOT="${OUTPUT_ROOT}/final_dataset"
+FINAL_AUDIO_DIR="${FINAL_DATASET_ROOT}/audio"
+FINAL_LABEL_JSON="${FINAL_DATASET_ROOT}/labels.json"
+FINAL_EXPORT_REQUIRE_TEXT=1   # 1=只导出有 text 的片段，0=全部导出
+FINAL_EXPORT_FORMAT="wav"
 
 ############################
 # 3）通用函数
 ############################
 
-# 打印带时间戳的日志
 log() {
   echo "[$(date '+%F %T')] $*"
 }
 
-# 检查文件是否存在
 need_file() {
   local f="$1"
   [[ -f "$f" ]] || { echo "ERROR: 文件不存在: $f" >&2; exit 1; }
 }
 
-# 如果输出已存在且 FORCE=0，则跳过
+need_path() {
+  local p="$1"
+  [[ -e "$p" ]] || { echo "ERROR: 路径不存在: $p" >&2; exit 1; }
+}
+
 maybe_skip() {
   local out="$1"
   local name="$2"
@@ -141,27 +173,71 @@ maybe_skip() {
   return 1
 }
 
-# 创建运行所需目录
+count_audio_files() {
+  local root="$1"
+  python3 - "$root" <<'PY'
+import os
+import sys
+root = sys.argv[1]
+exts = {".wav", ".flac", ".mp3", ".m4a", ".aac", ".ogg", ".opus", ".wma", ".mp4", ".mkv"}
+cnt = 0
+if os.path.isfile(root):
+    cnt = 1 if os.path.splitext(root)[1].lower() in exts else 0
+elif os.path.isdir(root):
+    for dp, _, fns in os.walk(root):
+        for fn in fns:
+            if os.path.splitext(fn)[1].lower() in exts:
+                cnt += 1
+print(cnt)
+PY
+}
+
+json_item_count() {
+  local json_path="$1"
+  python3 - "$json_path" <<'PY'
+import json
+import sys
+p = sys.argv[1]
+with open(p, "r", encoding="utf-8") as f:
+    x = json.load(f)
+print(len(x))
+PY
+}
+
 ensure_dirs() {
   mkdir -p \
+    "${OUTPUT_ROOT}" \
     "${OUTPUT_ROOT}/vad_output" \
     "${OUTPUT_ROOT}/whisper_lv3_output" \
     "${DNSMOS_SAVE_HOME}" \
+    "${PREPROCESS_OUT_ROOT}" \
+    "${FINAL_DATASET_ROOT}" \
+    "${FINAL_AUDIO_DIR}" \
     "${HF_HOME_HOST}" \
     "${TORCH_HOME_HOST}" \
     "${MODELSCOPE_CACHE_HOST}"
-
-  chmod -R a+rwX "${OUTPUT_ROOT}" 2>/dev/null || true
 }
 
 unlock_outputs() {
   chmod -R a+rwX "${OUTPUT_ROOT}" 2>/dev/null || true
 }
 
+prepare_fresh_run() {
+  if [[ "${FORCE}" -eq 1 ]]; then
+    log "[RUN] FORCE=1，清理本次输出目录中的旧产物"
+    rm -rf \
+      "${PREPROCESS_OUT_ROOT}" \
+      "${OUTPUT_ROOT}/vad_output" \
+      "${DNSMOS_SAVE_HOME}" \
+      "${OUTPUT_ROOT}/whisper_lv3_output" \
+      "${FINAL_DATASET_ROOT}" \
+      "${WHISPER_FINAL_JSON}" \
+      "${OUTPUT_ROOT}/_tmp_preprocess_audio.py" \
+      "${OUTPUT_ROOT}/_tmp_export_final_dataset.py" 2>/dev/null || true
+  fi
+}
+
 # 运行主流程镜像
-# 参数：
-#   1) GPU 规格，例如 "" / "device=0" / "all"
-#   2) 要执行的 bash 命令
 docker_run_runtime() {
   local gpu_spec="$1"
   local cmd="$2"
@@ -184,7 +260,7 @@ docker_run_runtime() {
       -e HUGGINGFACE_HUB_CACHE="${HF_HOME_HOST}/hub" \
       -e MODELSCOPE_CACHE="${MODELSCOPE_CACHE_HOST}" \
       "${RUNTIME_IMAGE}" \
-      bash -lc "umask 0000; ${cmd}"
+      bash -lc "${cmd}"
   else
     docker run --rm \
       --ipc=host \
@@ -202,13 +278,11 @@ docker_run_runtime() {
       -e HUGGINGFACE_HUB_CACHE="${HF_HOME_HOST}/hub" \
       -e MODELSCOPE_CACHE="${MODELSCOPE_CACHE_HOST}" \
       "${RUNTIME_IMAGE}" \
-      bash -lc "umask 0000; ${cmd}"
+      bash -lc "${cmd}"
   fi
 }
 
 # 运行 DNSMOS 镜像
-# 参数：
-#   1) 要执行的 bash 命令
 docker_run_dnsmos() {
   local cmd="$1"
 
@@ -221,13 +295,286 @@ docker_run_dnsmos() {
     -v "${PROJECT_ROOT}:${PROJECT_ROOT}" \
     -w "${DNSMOS_DIR}" \
     "${DNSMOS_DOCKER_IMAGE}" \
-    bash -lc "umask 0000; ${cmd}"
+    bash -lc "${cmd}"
 }
 
+########################################################
+# Step 0：统一预处理（采样率 / 声道 / 格式）
+########################################################
+
+ACTIVE_INPUT_ROOT="${INPUT_ROOT}"
+
+preprocess_input_audio() {
+  local src="${INPUT_ROOT%/}"
+  local helper_py="${OUTPUT_ROOT}/_tmp_preprocess_audio.py"
+
+  [[ "${src}" = /* ]] || { echo "ERROR: INPUT_ROOT 必须是绝对路径，当前值为: ${src}" >&2; exit 1; }
+  need_path "${src}"
+
+  cat > "${helper_py}" <<'PY'
+import os
+import sys
+import subprocess
+from pathlib import Path
+
+src = sys.argv[1]
+dst_root = sys.argv[2]
+target_sr = sys.argv[3]
+channels = sys.argv[4]
+codec = sys.argv[5]
+ext = sys.argv[6]
+overwrite = sys.argv[7]
+
+exts = {".wav", ".flac", ".mp3", ".m4a", ".aac", ".ogg", ".opus", ".wma", ".mp4", ".mkv"}
+
+Path(dst_root).mkdir(parents=True, exist_ok=True)
+
+def ffmpeg_one(inp, outp):
+    if os.path.exists(outp) and overwrite == "-n":
+        return False
+    Path(outp).parent.mkdir(parents=True, exist_ok=True)
+    cmd = [
+        "ffmpeg",
+        "-hide_banner",
+        "-loglevel", "error",
+        overwrite,
+        "-i", inp,
+        "-vn",
+        "-ac", channels,
+        "-ar", target_sr,
+        "-c:a", codec,
+        outp,
+    ]
+    subprocess.run(cmd, check=True)
+    return True
+
+count = 0
+
+if os.path.isfile(src):
+    stem = os.path.splitext(os.path.basename(src))[0]
+    outp = os.path.join(dst_root, f"{stem}.{ext}")
+    created = ffmpeg_one(src, outp)
+    count = 1 if created else 0
+
+elif os.path.isdir(src):
+    for dp, _, fns in os.walk(src):
+        for fn in fns:
+            if os.path.splitext(fn)[1].lower() not in exts:
+                continue
+            inp = os.path.join(dp, fn)
+            rel = os.path.relpath(inp, src)
+            rel_noext = os.path.splitext(rel)[0]
+            outp = os.path.join(dst_root, f"{rel_noext}.{ext}")
+            created = ffmpeg_one(inp, outp)
+            if created:
+                count += 1
+else:
+    print(f"ERROR: INPUT_ROOT 不存在: {src}", file=sys.stderr)
+    sys.exit(2)
+
+print(f"[PREPROCESS] wrote={count} files to {dst_root}")
+if count == 0:
+    sys.exit(3)
+PY
+
+  chmod a+rx "${helper_py}"
+
+  local ff_overwrite="-n"
+  [[ "${FORCE}" -eq 1 ]] && ff_overwrite="-y"
+
+  if [[ -f "${src}" ]]; then
+    log "[RUN] Preprocess single file -> ${PREPROCESS_OUT_ROOT}"
+  else
+    log "[RUN] Preprocess directory -> ${PREPROCESS_OUT_ROOT}"
+  fi
+
+  docker_run_runtime "" \
+    "python3 '${helper_py}' \
+      '${src}' \
+      '${PREPROCESS_OUT_ROOT}' \
+      '${PREPROCESS_TARGET_SR}' \
+      '${PREPROCESS_CHANNELS}' \
+      '${PREPROCESS_AUDIO_CODEC}' \
+      '${PREPROCESS_EXT}' \
+      '${ff_overwrite}'"
+
+  rm -f "${helper_py}"
+
+  ACTIVE_INPUT_ROOT="${PREPROCESS_OUT_ROOT}"
+}
+
+########################################################
+# Step 6：根据最终 JSON 导出切片音频 + 标注 JSON
+########################################################
+
+export_final_dataset() {
+  local in_json="$1"
+  local helper_py="${OUTPUT_ROOT}/_tmp_export_final_dataset.py"
+
+  cat > "${helper_py}" <<'PY'
+import json
+import os
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+in_json = sys.argv[1]
+audio_dir = sys.argv[2]
+label_json = sys.argv[3]
+audio_fmt = sys.argv[4]
+target_sr = sys.argv[5]
+channels = sys.argv[6]
+require_text = int(sys.argv[7])
+
+Path(audio_dir).mkdir(parents=True, exist_ok=True)
+
+with open(in_json, "r", encoding="utf-8") as f:
+    items = json.load(f)
+
+def safe_name(x):
+    x = str(x)
+    x = re.sub(r"[^0-9A-Za-z._-]+", "_", x)
+    x = re.sub(r"_+", "_", x).strip("_")
+    return x or "na"
+
+labels = []
+exported = 0
+skipped = 0
+
+for idx, item in enumerate(items):
+    src = item.get("path") or item.get("source_path")
+    text = (item.get("text") or "").strip()
+
+    if require_text == 1 and not text:
+        skipped += 1
+        continue
+
+    if not src or not os.path.isfile(src):
+        skipped += 1
+        continue
+
+    try:
+        start_sec = float(item.get("start_sec", 0.0))
+        end_sec = float(item.get("end_sec", 0.0))
+    except Exception:
+        skipped += 1
+        continue
+
+    if end_sec <= start_sec:
+        skipped += 1
+        continue
+
+    audio_id = safe_name(item.get("audio_id", "audio"))
+    seg_id = safe_name(item.get("seg_id", idx))
+    uid = f"{idx:08d}_{audio_id}_{seg_id}"
+    out_path = os.path.join(audio_dir, f"{uid}.{audio_fmt}")
+
+    ffmpeg_cmd = [
+        "ffmpeg",
+        "-hide_banner",
+        "-loglevel", "error",
+        "-y",
+        "-ss", str(start_sec),
+        "-to", str(end_sec),
+        "-i", src,
+        "-vn",
+        "-ac", str(channels),
+        "-ar", str(target_sr),
+    ]
+
+    if audio_fmt.lower() == "wav":
+        ffmpeg_cmd += ["-c:a", "pcm_s16le"]
+
+    ffmpeg_cmd += [out_path]
+
+    try:
+        subprocess.run(ffmpeg_cmd, check=True)
+    except subprocess.CalledProcessError:
+        skipped += 1
+        continue
+
+    label = {
+        "uid": uid,
+        "audio_id": item.get("audio_id"),
+        "seg_id": item.get("seg_id"),
+        "path": out_path,
+        "text": text,
+        "source_path": src,
+        "start_sec": start_sec,
+        "end_sec": end_sec,
+        "duration_sec": float(item.get("duration_sec", end_sec - start_sec)),
+        "lang": item.get("lang"),
+        "lang_prob": item.get("lang_prob"),
+    }
+
+    for k in [
+        "mos_sig", "mos_bak", "mos_ovr",
+        "spk_id", "sim_spk", "sim_file",
+        "error"
+    ]:
+        if k in item:
+            label[k] = item.get(k)
+
+    labels.append(label)
+    exported += 1
+
+with open(label_json, "w", encoding="utf-8") as f:
+    json.dump(labels, f, ensure_ascii=False, indent=2)
+
+print(f"[EXPORT] exported={exported}, skipped={skipped}, labels={label_json}")
+PY
+
+  chmod a+rx "${helper_py}"
+
+  log "[RUN] Export final dataset -> ${FINAL_AUDIO_DIR} + ${FINAL_LABEL_JSON}"
+  docker_run_runtime "" \
+    "python3 '${helper_py}' \
+      '${in_json}' \
+      '${FINAL_AUDIO_DIR}' \
+      '${FINAL_LABEL_JSON}' \
+      '${FINAL_EXPORT_FORMAT}' \
+      '${PREPROCESS_TARGET_SR}' \
+      '${PREPROCESS_CHANNELS}' \
+      '${FINAL_EXPORT_REQUIRE_TEXT}'"
+
+  rm -f "${helper_py}"
+}
+
+cleanup_intermediate_artifacts() {
+  log "[RUN] Cleaning intermediate artifacts ..."
+  rm -rf \
+    "${PREPROCESS_OUT_ROOT}" \
+    "${OUTPUT_ROOT}/vad_output" \
+    "${DNSMOS_SAVE_HOME}" \
+    "${OUTPUT_ROOT}/whisper_lv3_output" \
+    "${WHISPER_FINAL_JSON}" \
+    "${OUTPUT_ROOT}/_tmp_preprocess_audio.py" \
+    "${OUTPUT_ROOT}/_tmp_export_final_dataset.py" 2>/dev/null || true
+}
+
+prepare_fresh_run
 ensure_dirs
 
 ############################
-# 4）Step 1：VAD 切段
+# 4）Step 0：统一预处理
+############################
+
+if [[ "${DO_PREPROCESS}" -eq 1 ]]; then
+  preprocess_input_audio
+  ACTIVE_INPUT_ROOT="${PREPROCESS_OUT_ROOT}"
+else
+  ACTIVE_INPUT_ROOT="${INPUT_ROOT}"
+fi
+
+local_audio_count="$(count_audio_files "${ACTIVE_INPUT_ROOT}")"
+log "[INFO] 当前进入 VAD 的音频数: ${local_audio_count}"
+[[ "${local_audio_count}" -gt 0 ]] || { echo "ERROR: 进入 VAD 的音频数为 0，请检查 INPUT_ROOT 或预处理步骤" >&2; exit 1; }
+
+log "[INFO] VAD 输入路径: ${ACTIVE_INPUT_ROOT}"
+
+############################
+# 5）Step 1：VAD 切段
 ############################
 
 if [[ "$DO_VAD" -eq 1 ]]; then
@@ -237,7 +584,7 @@ if [[ "$DO_VAD" -eq 1 ]]; then
     log "[RUN] VAD -> ${VAD_OUT_JSON}"
 
     VAD_CMD="python3 '${VAD_PIPELINE_PY}' \
-      --input_root '${INPUT_ROOT}' \
+      --input_root '${ACTIVE_INPUT_ROOT}' \
       --out_json '${VAD_OUT_JSON}' \
       --min_dur '${VAD_MIN_DUR}' \
       --num_workers '${VAD_NUM_WORKERS}'"
@@ -250,18 +597,20 @@ if [[ "$DO_VAD" -eq 1 ]]; then
   fi
 fi
 
+need_file "${VAD_OUT_JSON}"
+local_vad_items="$(json_item_count "${VAD_OUT_JSON}")"
+log "[INFO] VAD 输出条目数: ${local_vad_items}"
+[[ "${local_vad_items}" -gt 0 ]] || { echo "ERROR: VAD 输出为 0，停止后续流程" >&2; exit 1; }
+
 ############################
-# 5）Step 2：DNSMOS 打分 + 合并
+# 6）Step 2：DNSMOS 打分 + 合并
 ############################
 
 if [[ "$DO_DNSMOS" -eq 1 ]]; then
-  need_file "${VAD_OUT_JSON}"
-
   if ! maybe_skip "${DNSMOS_MERGED_TSV}" "DNSMOS+MERGE"; then
     local_num_gpus=${#DNSMOS_GPUS[@]}
     GPUS_STR=$(IFS=,; echo "${DNSMOS_GPUS[*]}")
 
-    # 如果 shard 文件已经齐全，则不重新打分，只做 merge
     shopt -s nullglob
     SHARDS=( "${DNSMOS_SAVE_HOME}/dns_from_vad_"*"_${local_num_gpus}.tsv" )
     shopt -u nullglob
@@ -305,7 +654,7 @@ if [[ "$DO_DNSMOS" -eq 1 ]]; then
 fi
 
 ############################
-# 6）Step 3：DNSMOS 过滤
+# 7）Step 3：DNSMOS 过滤
 ############################
 
 if [[ "$DO_DNSMOS_FILTER" -eq 1 ]]; then
@@ -332,7 +681,7 @@ if [[ "$DO_DNSMOS_FILTER" -eq 1 ]]; then
 fi
 
 ############################
-# 7）Step 4：LID 过滤 + TSV 转 JSON
+# 8）Step 4：LID 过滤 + TSV 转 JSON
 ############################
 
 if [[ "$DO_LID" -eq 1 ]]; then
@@ -341,7 +690,6 @@ if [[ "$DO_LID" -eq 1 ]]; then
   if ! maybe_skip "${LANG_SEG_JSON}" "LANG_ID + TSV2SEG"; then
     log "[RUN] LangID -> ${LANG_OUT_FILTERED}"
 
-    # 这里显式使用塞进镜像的 spk_consistency 环境
     docker_run_runtime "device=${LID_GPU}" \
       "/opt/envs/spk_consistency/bin/python '${LANG_DIR}/lang_id_filter.py' \
         --in_tsv '${DNSMOS_FILTERED_TSV}' \
@@ -363,15 +711,14 @@ if [[ "$DO_LID" -eq 1 ]]; then
 fi
 
 ############################
-# 8）Step 5：Whisper 多卡转写
+# 9）Step 5：Whisper 多卡转写
 ############################
 
 if [[ "$DO_WHISPER" -eq 1 ]]; then
   need_file "${LANG_SEG_JSON}"
-  FINAL_WHISPER_JSON="${WHISPER_OUT_PREFIX}_all.json"
 
-  if ! maybe_skip "${FINAL_WHISPER_JSON}" "WHISPER"; then
-    log "[RUN] Whisper 多卡转写 -> ${FINAL_WHISPER_JSON}"
+  if ! maybe_skip "${WHISPER_FINAL_JSON}" "WHISPER"; then
+    log "[RUN] Whisper 多卡转写 -> ${WHISPER_FINAL_JSON}"
 
     NUM_SHARDS=${#PIPELINE_GPUS[@]}
     [[ "$NUM_SHARDS" -gt 0 ]] || { echo "ERROR: PIPELINE_GPUS 不能为空" >&2; exit 1; }
@@ -403,20 +750,36 @@ if [[ "$DO_WHISPER" -eq 1 ]]; then
       "python3 '${ASR_DIR}/merge_whisper_shards.py' \
         --seg_json '${LANG_SEG_JSON}' \
         --inputs ${WHISPER_OUT_PREFIX}_shard*.json \
-        --out '${FINAL_WHISPER_JSON}'"
+        --out '${WHISPER_FINAL_JSON}'"
   fi
 fi
 
 ############################
-# 9）结束信息
+# 10）Step 6：导出最终数据集（切片音频 + 标注 JSON）
+############################
+
+if [[ "${DO_EXPORT_FINAL}" -eq 1 ]]; then
+  need_file "${WHISPER_FINAL_JSON}"
+
+  if ! maybe_skip "${FINAL_LABEL_JSON}" "EXPORT_FINAL_DATASET"; then
+    export_final_dataset "${WHISPER_FINAL_JSON}"
+  fi
+fi
+
+############################
+# 11）可选：清理中间产物
+############################
+
+if [[ "${DO_CLEAN_INTERMEDIATE}" -eq 1 ]]; then
+  cleanup_intermediate_artifacts
+fi
+
+############################
+# 12）结束信息
 ############################
 
 unlock_outputs
 
 log "流程结束。"
-log "  VAD_OUT_JSON:        ${VAD_OUT_JSON}"
-log "  DNSMOS_MERGED_TSV:   ${DNSMOS_MERGED_TSV}"
-log "  DNSMOS_FILTERED_TSV: ${DNSMOS_FILTERED_TSV}"
-log "  LANG_OUT_FILTERED:   ${LANG_OUT_FILTERED}"
-log "  LANG_SEG_JSON:       ${LANG_SEG_JSON}"
-log "  WHISPER_FINAL_JSON:  ${WHISPER_OUT_PREFIX}_all.json"
+log "  FINAL_AUDIO_DIR:  ${FINAL_AUDIO_DIR}"
+log "  FINAL_LABEL_JSON: ${FINAL_LABEL_JSON}"
