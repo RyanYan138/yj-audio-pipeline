@@ -54,9 +54,44 @@ def make_audio_id(root: Path, audio_path: Path) -> str:
     return rel.with_suffix("").as_posix().replace("/", "_")
 
 
-def process_one(args: Tuple[str, str, float]) -> Dict[str, Any]:
+def split_long_segment(start_sec: float, end_sec: float, min_dur: float, max_dur: float):
+    """
+    把一个过长片段按 max_dur 切成多个小段
+    最后一段如果 < min_dur，则丢弃
+    """
+    dur = end_sec - start_sec
+
+    # 不限制最大时长，或者本来就不超长
+    if max_dur <= 0 or dur <= max_dur:
+        if dur >= min_dur:
+            return [
+                {
+                    "start_sec": round(start_sec, 3),
+                    "end_sec": round(end_sec, 3),
+                    "duration_sec": round(dur, 3),
+                }
+            ]
+        return []
+
+    segs = []
+    cur = start_sec
+    while cur < end_sec:
+        nxt = min(cur + max_dur, end_sec)
+        sub_dur = nxt - cur
+        if sub_dur >= min_dur:
+            segs.append(
+                {
+                    "start_sec": round(cur, 3),
+                    "end_sec": round(nxt, 3),
+                    "duration_sec": round(sub_dur, 3),
+                }
+            )
+        cur = nxt
+    return segs
+
+def process_one(args: Tuple[str, str, float, float]) -> Dict[str, Any]:
     """处理单个音频：跑 VAD -> segments"""
-    root_str, audio_path_str, min_dur = args
+    root_str, audio_path_str, min_dur, max_dur = args
     root = Path(root_str)
     audio_path = Path(audio_path_str)
     audio_id = make_audio_id(root, audio_path)
@@ -79,16 +114,7 @@ def process_one(args: Tuple[str, str, float]) -> Dict[str, Any]:
     for t in timestamps:
         start_sec = float(t["start"])
         end_sec = float(t["end"])
-        dur = end_sec - start_sec
-        if dur < min_dur:
-            continue
-        segments.append(
-            {
-                "start_sec": round(start_sec, 3),
-                "end_sec": round(end_sec, 3),
-                "duration_sec": round(dur, 3),
-            }
-        )
+        segments.extend(split_long_segment(start_sec, end_sec, min_dur, max_dur))    
 
     return {
         "audio_id": audio_id,
@@ -102,6 +128,7 @@ def build_vad_index_mp(
     input_root: str,
     out_json: str,
     min_dur: float,
+    max_dur: float,
     num_workers: int,
     max_files: int,
 ):
@@ -123,9 +150,9 @@ def build_vad_index_mp(
     # 3) worker 数：<=0 则自动
     if num_workers <= 0:
         num_workers = max(1, min(32, cpu_count() or 4))
-    print(f"[VAD] Using {num_workers} workers, min_dur={min_dur}")
+    print(f"[VAD] Using {num_workers} workers, min_dur={min_dur}, max_dur={max_dur}")
 
-    tasks = [(str(input_root_p), str(p), float(min_dur)) for p in audio_files]
+    tasks = [(str(input_root_p), str(p), float(min_dur), float(max_dur)) for p in audio_files]
 
     all_items: List[Optional[Dict[str, Any]]] = [None] * total
 
@@ -153,7 +180,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--input_root", required=True, help="root dir containing audio files")
     ap.add_argument("--out_json", required=True, help="output segments json path")
-    ap.add_argument("--min_dur", type=float, default=0.75, help="drop segments shorter than this (sec)")
+    ap.add_argument("--min_dur", type=float, default=1.0, help="drop segments shorter than this (sec)")
+    ap.add_argument("--max_dur", type=float, default=30.0, help="split segments longer than this (sec); <=0 means no limit")
     ap.add_argument("--num_workers", type=int, default=32, help="mp workers; <=0 means auto")
     ap.add_argument("--max_files", type=int, default=0, help="0 means all files; otherwise process first N files")
     args = ap.parse_args()
@@ -162,6 +190,7 @@ def main():
         input_root=args.input_root,
         out_json=args.out_json,
         min_dur=args.min_dur,
+        max_dur=args.max_dur,
         num_workers=args.num_workers,
         max_files=args.max_files,
     )

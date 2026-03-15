@@ -99,6 +99,7 @@ PREPROCESS_OUT_ROOT="${OUTPUT_ROOT}/_tmp_16k_audio"
 VAD_PIPELINE_PY="${PROJECT_ROOT}/vad/vad_pipeline.py"
 VAD_OUT_JSON="${OUTPUT_ROOT}/vad_output/${DATASET_NAME}_silero_vad_segments_mp_Ordered.json"
 VAD_MIN_DUR="5.0"
+VAD_MAX_DUR="30"
 VAD_NUM_WORKERS="32"
 VAD_MAX_FILES=""
 
