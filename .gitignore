@@ -22,3 +22,6 @@ datas/
 data/
 core.*
 dns_mos/core.*
+
+# models (too large for git)
+models/

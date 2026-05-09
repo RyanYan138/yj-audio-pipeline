@@ -19,15 +19,15 @@ set -euo pipefail
 
 FORCE=1
 
-PROJECT_ROOT="/Work21/2025/yanjiahao/YJ-audio-pipeline/yj-audio-pipeline"
+PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-DATASET_NAME="4hw_wild_datas1_v1"
+DATASET_NAME="test_run"
 
-OUTPUT_ROOT="/CDShare3/Huawei_Encoder_Proj/datas/YJoutput/${DATASET_NAME}"
+OUTPUT_ROOT="${PROJECT_ROOT}/output/${DATASET_NAME}"
 
-INPUT_ROOT="/Work21/2026/liangjintao/WavCrawler/wav_segments"
+INPUT_ROOT="${PROJECT_ROOT}/test/audio"
+DO_PREPROCESS=0
 
-DO_PREPROCESS=1
 
 PREPROCESS_TARGET_SR="16000"
 PREPROCESS_CHANNELS="1"
@@ -42,9 +42,9 @@ LID_GPU=0
 
 LANG_TARGET_LANGS=("en" "zh")
 
-WHISPER_MODEL_DIR_HOST="/Work21/2025/yanjiahao/modelscope_cache/models/AI-ModelScope/whisper-large-v3"
+WHISPER_MODEL_DIR_HOST="${PROJECT_ROOT}/models/whisper-large-v3"
 
-LID_MODEL_DIR_HOST="/Work21/2025/yanjiahao/hf_cache/models--Systran--faster-whisper-large-v3/snapshots/edaa852ec7e145841d8ffdb056a99866b5f0a478"
+LID_MODEL_DIR_HOST="${PROJECT_ROOT}/models/faster-whisper-large-v3"
 
 DO_VAD=1
 DO_DNSMOS=1
