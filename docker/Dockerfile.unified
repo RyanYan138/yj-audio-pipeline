@@ -1,0 +1,56 @@
+# Unified single-image for YJ audio pipeline — single Python environment.
+# Merges: dnsmos_gpu:cuda118 + all runtime/ASR/LID deps into one env.
+# Build:
+#   cd yj-audio-pipeline/docker
+#   docker build -f Dockerfile.unified -t yj-pipeline-unified:latest .
+
+FROM dnsmos_gpu:cuda118
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1
+
+# System tools
+RUN apt-get update && apt-get install -y \
+    git ffmpeg sox libsox-fmt-all \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN python3 -m pip install --upgrade pip setuptools wheel
+
+# Torch 2.6.0 cu118
+RUN python3 -m pip install \
+    --index-url https://download.pytorch.org/whl/cu118 \
+    torch==2.6.0 torchaudio==2.6.0
+
+# 全部运行时依赖（VAD / LID / ASR / DNSMOS / spk_consistency 原有包合并）
+# numpy 固定 1.26.4：onnxruntime-gpu==1.16.3 (CUDA 11.8) 只兼容 numpy 1.x
+RUN python3 -m pip install \
+    numpy==1.26.4 \
+    scipy==1.15.3 \
+    soundfile==0.13.1 \
+    silero-vad==6.2.0 \
+    faster-whisper==1.2.1 \
+    ctranslate2==4.6.2 \
+    transformers==4.57.1 \
+    modelscope==1.31.0 \
+    huggingface-hub==0.36.0 \
+    sentencepiece==0.2.1 \
+    safetensors==0.6.2 \
+    requests==2.32.5 \
+    urllib3==2.6.3 \
+    idna==3.11 \
+    certifi==2026.1.4 \
+    charset-normalizer==3.4.4 \
+    av==16.1.0 \
+    coloredlogs==15.0.1 \
+    tqdm==4.66.5
+
+# 强制锁定 onnxruntime-gpu + numpy，防止被其他依赖覆盖
+RUN python3 -m pip install --force-reinstall \
+    onnxruntime-gpu==1.16.3 \
+    numpy==1.26.4
+
+RUN ln -sf /usr/bin/python3 /usr/bin/python
+
+WORKDIR /workspace
