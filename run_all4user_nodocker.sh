@@ -1,11 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# cuDNN/cuBLAS 路径（集群节点无系统级 cuDNN，从 conda env 中加载）
+_ENV_LIB=/Work21/2025/yanjiahao/conda-envs/emilia_pipe_clean/lib/python3.9/site-packages/nvidia
+export LD_LIBRARY_PATH="${_ENV_LIB}/cudnn/lib:${_ENV_LIB}/cublas/lib:${LD_LIBRARY_PATH:-}"
+
 ############################################
 # YJ 音频清洗流程 v3（无 Docker 版）
 #
 # 相比 run_all4userv2.sh 的变化：
-#   - 去掉所有 Docker 调用，直接用 conda 环境里的 python3 跑
+#   - 去掉所有 Docker 调用，直接用 conda 环境里的 /Work21/2025/yanjiahao/conda-envs/emilia_pipe_clean/bin/python 跑
 #   - GPU 绑定改用 CUDA_VISIBLE_DEVICES
 #   - 其余逻辑完全不变
 #
@@ -42,9 +46,9 @@ LID_GPU=0
 
 LANG_TARGET_LANGS=("en" "zh")
 
-WHISPER_MODEL_DIR_HOST="${PROJECT_ROOT}/models/whisper-large-v3"
+WHISPER_MODEL_DIR_HOST="/Work21/2025/yanjiahao/modelscope_cache/models/AI-ModelScope/whisper-large-v3"
 
-LID_MODEL_DIR_HOST="${PROJECT_ROOT}/models/faster-whisper-large-v3"
+LID_MODEL_DIR_HOST="/Work21/2025/yanjiahao/hf_cache/models--Systran--faster-whisper-large-v3/snapshots/edaa852ec7e145841d8ffdb056a99866b5f0a478"
 
 DO_VAD=1
 DO_DNSMOS=1
@@ -63,7 +67,7 @@ PREPROCESS_OUT_ROOT="${OUTPUT_ROOT}/_tmp_16k_audio"
 
 VAD_PIPELINE_PY="${PROJECT_ROOT}/vad/vad_pipeline.py"
 VAD_OUT_JSON="${OUTPUT_ROOT}/vad_output/${DATASET_NAME}_silero_vad_segments_mp_Ordered.json"
-VAD_MIN_DUR="5.0"
+VAD_MIN_DUR="1.0"
 VAD_MAX_DUR="30"
 VAD_NUM_WORKERS="32"
 VAD_MAX_FILES=""
@@ -138,7 +142,7 @@ maybe_skip() {
 
 count_audio_files() {
   local root="$1"
-  python3 - "$root" <<'PY'
+  /Work21/2025/yanjiahao/conda-envs/emilia_pipe_clean/bin/python - "$root" <<'PY'
 import os
 import sys
 root = sys.argv[1]
@@ -157,7 +161,7 @@ PY
 
 json_item_count() {
   local json_path="$1"
-  python3 - "$json_path" <<'PY'
+  /Work21/2025/yanjiahao/conda-envs/emilia_pipe_clean/bin/python - "$json_path" <<'PY'
 import json
 import sys
 p = sys.argv[1]
@@ -302,7 +306,7 @@ PY
   fi
 
   run_cmd "" \
-    "python3 '${helper_py}' \
+    "/Work21/2025/yanjiahao/conda-envs/emilia_pipe_clean/bin/python '${helper_py}' \
       '${src}' \
       '${PREPROCESS_OUT_ROOT}' \
       '${PREPROCESS_TARGET_SR}' \
@@ -384,7 +388,7 @@ for idx, item in enumerate(items):
 
     ffmpeg_cmd = [
         "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
-        "-ss", str(start_sec), "-to", str(end_sec),
+        "-ss", str(start_sec), "-t", str(round(end_sec - start_sec, 3)),
         "-i", src, "-vn", "-ac", str(channels), "-ar", str(target_sr),
     ]
     if audio_fmt.lower() == "wav":
@@ -427,7 +431,7 @@ PY
 
   log "[RUN] Export final dataset -> ${FINAL_AUDIO_DIR} + ${FINAL_LABEL_JSON}"
   run_cmd "" \
-    "python3 '${helper_py}' \
+    "/Work21/2025/yanjiahao/conda-envs/emilia_pipe_clean/bin/python '${helper_py}' \
       '${in_json}' \
       '${FINAL_AUDIO_DIR}' \
       '${FINAL_LABEL_JSON}' \
@@ -480,7 +484,7 @@ if [[ "$DO_VAD" -eq 1 ]]; then
   if ! maybe_skip "${VAD_OUT_JSON}" "VAD"; then
     log "[RUN] VAD -> ${VAD_OUT_JSON}"
 
-    VAD_CMD="python3 '${VAD_PIPELINE_PY}' \
+    VAD_CMD="/Work21/2025/yanjiahao/conda-envs/emilia_pipe_clean/bin/python '${VAD_PIPELINE_PY}' \
       --input_root '${ACTIVE_INPUT_ROOT}' \
       --out_json '${VAD_OUT_JSON}' \
       --min_dur '${VAD_MIN_DUR}' \
@@ -519,7 +523,7 @@ if [[ "$DO_DNSMOS" -eq 1 ]]; then
         IFS=',' read -r -a GPUS <<< '${GPUS_STR}'
         for IDX in \"\${!GPUS[@]}\"; do
           GPU=\${GPUS[\$IDX]}
-          CUDA_VISIBLE_DEVICES=\$GPU python3 '${DNSMOS_DIR}/eval_dns_from_vad_json.py' \
+          CUDA_VISIBLE_DEVICES=\$GPU /Work21/2025/yanjiahao/conda-envs/emilia_pipe_clean/bin/python '${DNSMOS_DIR}/eval_dns_from_vad_json.py' \
             --vad-json '${VAD_OUT_JSON}' \
             --np '${local_num_gpus}' --idx \"\$IDX\" \
             --input-length '${DNSMOS_INPUT_LENGTH}' \
@@ -535,7 +539,7 @@ if [[ "$DO_DNSMOS" -eq 1 ]]; then
 
     log "[RUN] Merge DNSMOS shards -> ${DNSMOS_MERGED_TSV}"
     run_cmd "" \
-      "python3 '${DNSMOS_DIR}/merge_dns_by_json_order.py' \
+      "/Work21/2025/yanjiahao/conda-envs/emilia_pipe_clean/bin/python '${DNSMOS_DIR}/merge_dns_by_json_order.py' \
         --vad-json '${VAD_OUT_JSON}' \
         --shard-dir '${DNSMOS_SAVE_HOME}' \
         --output '${DNSMOS_MERGED_TSV}'"
@@ -552,7 +556,7 @@ if [[ "$DO_DNSMOS_FILTER" -eq 1 ]]; then
   if ! maybe_skip "${DNSMOS_FILTERED_TSV}" "DNSMOS_FILTER"; then
     log "[RUN] DNSMOS 过滤 -> ${DNSMOS_FILTERED_TSV}"
 
-    FILTER_CMD="python3 '${DNSMOS_DIR}/filter_dnsmos_tsv.py' \
+    FILTER_CMD="/Work21/2025/yanjiahao/conda-envs/emilia_pipe_clean/bin/python '${DNSMOS_DIR}/filter_dnsmos_tsv.py' \
       --in_tsv '${DNSMOS_MERGED_TSV}' \
       --out_tsv '${DNSMOS_FILTERED_TSV}' \
       --min_dur '${DNSMOS_FILTER_MIN_DUR}' \
@@ -578,7 +582,7 @@ if [[ "$DO_LID" -eq 1 ]]; then
     log "[RUN] LangID -> ${LANG_OUT_FILTERED}"
 
     run_cmd "device=${LID_GPU}" \
-      "python3 '${LANG_DIR}/lang_id_filter.py' \
+      "/Work21/2025/yanjiahao/conda-envs/emilia_pipe_clean/bin/python '${LANG_DIR}/lang_id_filter.py' \
         --in_tsv '${DNSMOS_FILTERED_TSV}' \
         --out_scores '${LANG_OUT_SCORES}' \
         --out_filtered '${LANG_OUT_FILTERED}' \
@@ -591,7 +595,7 @@ if [[ "$DO_LID" -eq 1 ]]; then
 
     log "[RUN] TSV -> segments json -> ${LANG_SEG_JSON}"
     run_cmd "" \
-      "python3 '${TSV2SEG_PY}' \
+      "/Work21/2025/yanjiahao/conda-envs/emilia_pipe_clean/bin/python '${TSV2SEG_PY}' \
         --in_tsv '${LANG_OUT_FILTERED}' \
         --out_json '${LANG_SEG_JSON}'"
   fi
@@ -618,7 +622,7 @@ if [[ "$DO_WHISPER" -eq 1 ]]; then
       OUT_SHARD="${WHISPER_OUT_PREFIX}_shard${IDX}.json"
 
       run_cmd "device=${GPU}" \
-        "python3 '${ASR_DIR}/whisper_ms_from_segments.py' \
+        "/Work21/2025/yanjiahao/conda-envs/emilia_pipe_clean/bin/python '${ASR_DIR}/whisper_ms_from_segments.py' \
           --seg_json '${LANG_SEG_JSON}' \
           --out_json '${OUT_SHARD}' \
           --model_dir '${WHISPER_MODEL_DIR_HOST}' \
@@ -632,7 +636,7 @@ if [[ "$DO_WHISPER" -eq 1 ]]; then
     wait
 
     run_cmd "" \
-      "python3 '${ASR_DIR}/merge_whisper_shards.py' \
+      "/Work21/2025/yanjiahao/conda-envs/emilia_pipe_clean/bin/python '${ASR_DIR}/merge_whisper_shards.py' \
         --seg_json '${LANG_SEG_JSON}' \
         --inputs ${WHISPER_OUT_PREFIX}_shard*.json \
         --out '${WHISPER_FINAL_JSON}'"
