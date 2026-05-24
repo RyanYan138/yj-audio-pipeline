@@ -21,6 +21,8 @@ import sys
 import traceback
 from pathlib import Path
 
+import os
+import tempfile
 import numpy as np
 import soundfile as sf
 import torch
@@ -74,7 +76,8 @@ def load_segments(seg_json: str, num_shards: int, shard_id: int, max_files=None)
     return shard
 
 
-def read_segment(path: str, start_sec: float, end_sec: float) -> np.ndarray:
+def read_segment(path: str, start_sec: float, end_sec: float, tmp_dir: str) -> str:
+    """切片音频并写入临时文件，返回临时文件路径（FunASR Nano 只接受文件路径输入）"""
     with sf.SoundFile(path) as f:
         sr = f.samplerate
         start_frame = int(start_sec * sr)
@@ -86,7 +89,9 @@ def read_segment(path: str, start_sec: float, end_sec: float) -> np.ndarray:
         audio_t = torch.from_numpy(audio).unsqueeze(0)
         audio_t = torchaudio.functional.resample(audio_t, sr, SAMPLE_RATE)
         audio = audio_t.squeeze(0).numpy()
-    return audio
+    tmp_path = os.path.join(tmp_dir, f"{os.getpid()}_{hash(path)}_{start_sec:.3f}.wav")
+    sf.write(tmp_path, audio, SAMPLE_RATE)
+    return tmp_path
 
 
 def main():
@@ -117,47 +122,43 @@ def main():
         return
 
     results = []
-    batch_audio = []
-    batch_meta = []
-
-    def flush_batch():
-        if not batch_audio:
-            return
-        try:
-            lang_arg = {} if args.language == "auto" else {"language": args.language}
-            res = model.generate(
-                input=batch_audio,
-                batch_size=len(batch_audio),
-                **lang_arg,
-            )
-            for meta, r in zip(batch_meta, res):
-                text = r.get("text", "").strip() if isinstance(r, dict) else str(r).strip()
-                results.append({**meta, "text": text})
-        except Exception as e:
-            logger.warning(f"Batch failed: {e}")
-            traceback.print_exc()
-            for meta in batch_meta:
-                results.append({**meta, "text": ""})
-        batch_audio.clear()
-        batch_meta.clear()
+    # FunASR Nano 只接受文件路径，逐条推理（不支持 batch 也不支持 numpy array）
+    lang_arg = {} if args.language == "auto" else {"language": args.language}
+    tmp_dir = tempfile.mkdtemp(prefix="funasr_seg_")
 
     for i, seg in enumerate(segments):
+        tmp_path = None
         try:
-            audio = read_segment(seg["path"], seg["start_sec"], seg["end_sec"])
-            batch_audio.append(audio)
-            batch_meta.append(seg)
+            tmp_path = read_segment(seg["path"], seg["start_sec"], seg["end_sec"], tmp_dir)
         except Exception as e:
             logger.warning(f"[SKIP] {seg['seg_id']}: {e}")
             results.append({**seg, "text": ""})
             continue
 
-        if len(batch_audio) >= args.batch_size:
-            flush_batch()
+        try:
+            res = model.generate(input=tmp_path, **lang_arg)
+            if isinstance(res, list) and len(res) > 0:
+                r = res[0]
+                text = r.get("text", "").strip() if isinstance(r, dict) else str(r).strip()
+            else:
+                text = ""
+        except Exception as e:
+            logger.warning(f"[ASR FAIL] {seg['seg_id']}: {e}")
+            text = ""
+        finally:
+            if tmp_path and os.path.exists(tmp_path):
+                os.remove(tmp_path)
 
-        if (i + 1) % 100 == 0:
+        results.append({**seg, "text": text})
+
+        if (i + 1) % 20 == 0:
             logger.info(f"  {i+1}/{len(segments)}")
 
-    flush_batch()
+    # 清理临时目录
+    try:
+        os.rmdir(tmp_dir)
+    except Exception:
+        pass
 
     Path(args.out_json).parent.mkdir(parents=True, exist_ok=True)
     with open(args.out_json, "w", encoding="utf-8") as f:

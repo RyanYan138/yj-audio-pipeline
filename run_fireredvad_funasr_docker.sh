@@ -2,8 +2,8 @@
 set -euo pipefail
 
 # 主流程用 emilia_pipe_clean，FunASR Nano ASR 步骤用 funasr_nano（Python 3.10）
-_ENV_LIB=/Work21/2025/yanjiahao/conda-envs/emilia_pipe_clean/lib/python3.9/site-packages/nvidia
-_FUNASR_ENV_LIB=/Work21/2025/yanjiahao/conda-envs/funasr_nano/lib/python3.10/site-packages/nvidia
+_ENV_LIB=/opt/conda/envs/yj_pipeline/lib/python3.12/site-packages/nvidia
+_FUNASR_ENV_LIB=/opt/conda/envs/yj_pipeline/lib/python3.12/site-packages/nvidia
 export LD_LIBRARY_PATH="${_ENV_LIB}/cudnn/lib:${_ENV_LIB}/cublas/lib:${_FUNASR_ENV_LIB}/cudnn/lib:${_FUNASR_ENV_LIB}/cublas/lib:${LD_LIBRARY_PATH:-}"
 
 ############################################
@@ -14,8 +14,8 @@ export LD_LIBRARY_PATH="${_ENV_LIB}/cudnn/lib:${_ENV_LIB}/cublas/lib:${_FUNASR_E
 
 FORCE=1
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PYTHON=/Work21/2025/yanjiahao/conda-envs/emilia_pipe_clean/bin/python
-PYTHON_FUNASR=/Work21/2025/yanjiahao/conda-envs/funasr_nano/bin/python
+PYTHON=/opt/conda/envs/yj_pipeline/bin/python
+PYTHON_FUNASR=/opt/conda/envs/yj_pipeline/bin/python
 
 DATASET_NAME="test_run_fireredvad_funasr"
 OUTPUT_ROOT="${PROJECT_ROOT}/output/${DATASET_NAME}"
