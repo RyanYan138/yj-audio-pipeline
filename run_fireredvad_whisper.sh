@@ -2,8 +2,6 @@
 set -euo pipefail
 
 # cuDNN/cuBLAS（集群节点无系统级 cuDNN）
-_ENV_LIB=/Work21/2025/yanjiahao/conda-envs/emilia_pipe_clean/lib/python3.9/site-packages/nvidia
-export LD_LIBRARY_PATH="${_ENV_LIB}/cudnn/lib:${_ENV_LIB}/cublas/lib:${LD_LIBRARY_PATH:-}"
 
 ############################################
 # FireRedVAD + Whisper-large-v3
@@ -12,7 +10,9 @@ export LD_LIBRARY_PATH="${_ENV_LIB}/cudnn/lib:${_ENV_LIB}/cublas/lib:${LD_LIBRAR
 
 FORCE=1
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PYTHON=/Work21/2025/yanjiahao/conda-envs/emilia_pipe_clean/bin/python
+PYTHON=python3
+# FireRedVAD 用 funasr_nano (Python 3.10)
+PYTHON_VAD=python3
 
 DATASET_NAME="test_run_fireredvad_whisper"
 OUTPUT_ROOT="${PROJECT_ROOT}/output/${DATASET_NAME}"
@@ -24,10 +24,10 @@ LID_GPU=0
 LANG_TARGET_LANGS=("en" "zh")
 
 # 模型路径
-FIREREDVAD_MODEL="/Work21/2025/yanjiahao/FireRedVAD/pretrained_models/xukaituo/FireRedVAD/VAD"
-FIREREDVAD_ROOT="/Work21/2025/yanjiahao/FireRedVAD"
-WHISPER_MODEL_DIR="/Work21/2025/yanjiahao/modelscope_cache/models/AI-ModelScope/whisper-large-v3"
-LID_MODEL_DIR="/Work21/2025/yanjiahao/hf_cache/models--Systran--faster-whisper-large-v3/snapshots/edaa852ec7e145841d8ffdb056a99866b5f0a478"
+FIREREDVAD_MODEL="${PROJECT_ROOT}/FireRedVAD/pretrained_models/xukaituo/FireRedVAD/VAD"
+FIREREDVAD_ROOT="${PROJECT_ROOT}/FireRedVAD"
+WHISPER_MODEL_DIR="${PROJECT_ROOT}/models/whisper-large-v3"
+LID_MODEL_DIR="${PROJECT_ROOT}/models/faster-whisper-large-v3"
 
 # FireRedVAD 参数
 VAD_USE_GPU=1
@@ -114,7 +114,7 @@ if [[ "$DO_VAD" -eq 1 ]]; then
   need_file "${VAD_PIPELINE_PY}"
   if ! maybe_skip "${VAD_OUT_JSON}" "FireRedVAD"; then
     log "[RUN] FireRedVAD -> ${VAD_OUT_JSON}"
-    CUDA_VISIBLE_DEVICES="${PIPELINE_GPUS[0]}" $PYTHON "${VAD_PIPELINE_PY}" \
+    CUDA_VISIBLE_DEVICES="${PIPELINE_GPUS[0]}" $PYTHON_VAD "${VAD_PIPELINE_PY}" \
       --input_root "${INPUT_ROOT}" \
       --out_json "${VAD_OUT_JSON}" \
       --model_dir "${FIREREDVAD_MODEL}" \
