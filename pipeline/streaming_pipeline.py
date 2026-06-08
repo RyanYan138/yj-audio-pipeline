@@ -14,7 +14,7 @@
     --input_root /path/to/audio \
     --out_json   /path/to/labels.json \
     --vad_model  silero|fireredvad \
-    --asr_model  whisper|funasr \
+    --asr_model  whisper|funasr|funasr_vllm \
     --whisper_model_dir /path/to/whisper-large-v3 \
     --funasr_model_dir  /path/to/Fun-ASR-Nano-2512 \
     --lid_model_dir     /path/to/faster-whisper-large-v3 \
@@ -23,6 +23,9 @@
     [--min_dur 1.0] [--max_dur 30.0] \
     [--min_mos_ovr 2.0] [--target_langs en zh] \
     [--fireredvad_root /path/to/FireRedVAD]
+
+注意：funasr_vllm 模式下 ASR 在主进程运行（vllm 不支持子进程），
+      Consumer 也合并到主进程，--gpus 第一个 GPU 给 vllm 用。
 """
 
 import argparse
@@ -234,19 +237,15 @@ def dnsmos_worker(dnsmos_q: mp.Queue, lid_q: mp.Queue,
             logger.warning(f"[DNSMOS] {item.get('audio_id')} failed: {ex}")
 
 
-
 def lid_worker(lid_q: mp.Queue, asr_q: mp.Queue,
                model_dir: str, gpu_id: int,
                target_langs: List[str], min_lang_prob: float):
     """语言识别 + 过滤 worker（基于 faster-whisper）"""
-    import torch
     from faster_whisper import WhisperModel
-    os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
-    os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
-    model = WhisperModel(model_dir, device="cuda", compute_type="float16")
-    logger.info(f"[LID gpu={gpu_id}] ready")
+    # ctranslate2 cudnn9 依赖在 funasr_vllm 镜像里不满足，固定用 cpu/int8
+    model = WhisperModel(model_dir, device="cpu", compute_type="int8")
+    logger.info("[LID] ready (cpu/int8)")
 
-    # 缓存：同一 audio_id 只检测一次
     lang_cache: Dict[str, Tuple[str, float]] = {}
 
     while True:
@@ -284,11 +283,15 @@ def whisper_asr_worker(asr_q: mp.Queue, result_q: mp.Queue,
                        batch_size: int = 8):
     """Whisper 转写 worker，用 faster-whisper（CTranslate2 后端，无 numpy 类型问题）"""
     from faster_whisper import WhisperModel
-    import torch
 
     os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
-    model = WhisperModel(model_dir, device="cuda", compute_type="float16")
-    logger.info(f"[Whisper gpu={gpu_id}] ready (faster-whisper)")
+    try:
+        model = WhisperModel(model_dir, device="cuda", compute_type="float16")
+        logger.info(f"[Whisper gpu={gpu_id}] ready (cuda)")
+    except Exception as e:
+        logger.warning(f"[Whisper] cuda init failed ({e}), fallback to cpu")
+        model = WhisperModel(model_dir, device="cpu", compute_type="int8")
+        logger.info(f"[Whisper] ready (cpu/int8)")
 
     while True:
         try:
@@ -339,6 +342,151 @@ def funasr_asr_worker(asr_q: mp.Queue, result_q: mp.Queue,
 
     import shutil
     shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
+# ─────────────────────────────────────────────
+# Stage 5c: FunASR Nano vLLM — 主进程内运行
+# 两阶段方案：
+#   Phase 1 — 多进程跑 VAD+DNSMOS+LID，结果收集到 shared list
+#   Phase 2 — 所有子进程退出后，主进程独占 GPU 跑 vllm
+# ─────────────────────────────────────────────
+
+def lid_worker_collect(lid_q: mp.Queue, out_q: mp.Queue,
+                       model_dir: str, gpu_id: int,
+                       target_langs: List[str], min_lang_prob: float):
+    """LID worker，通过的 segment 放进 out_q（供主进程收集），最后发 SENTINEL"""
+    from faster_whisper import WhisperModel
+    # ctranslate2 cudnn9 依赖在 funasr_vllm 镜像里不满足，固定用 cpu/int8
+    model = WhisperModel(model_dir, device="cpu", compute_type="int8")
+    logger.info("[LID] ready (cpu/int8)")
+
+    lang_cache: Dict[str, Tuple[str, float]] = {}
+
+    while True:
+        item = lid_q.get()
+        if item is SENTINEL:
+            out_q.put(SENTINEL)
+            break
+        audio_id = item["audio_id"]
+        try:
+            if audio_id not in lang_cache:
+                audio = load_audio(item["path"], item["start_sec"],
+                                   min(item["end_sec"], item["start_sec"] + 12.0))
+                _, info = model.transcribe(audio, task="transcribe")
+                lang = info.language
+                prob = info.language_probability
+                lang_cache[audio_id] = (lang, prob)
+            else:
+                lang, prob = lang_cache[audio_id]
+
+            if target_langs and lang not in target_langs:
+                continue
+            if prob < min_lang_prob:
+                continue
+            out_q.put({**item, "lang": lang, "lang_prob": round(prob, 4)})
+        except Exception as ex:
+            logger.warning(f"[LID] {audio_id} failed: {ex}")
+
+
+def funasr_vllm_phase2(segments: List[dict],
+                       model_dir: str,
+                       gpu_id: int,
+                       batch_size: int,
+                       out_json: str,
+                       audio_dir: str):
+    """Phase 2: 所有子进程已退出，主进程独占 GPU 跑 vllm 批量 ASR"""
+    import re
+    import subprocess
+
+    cusparselt_path = "/opt/conda/envs/funasr_vllm/lib/python3.12/site-packages/nvidia/cusparselt/lib"
+    if os.path.exists(cusparselt_path):
+        existing = os.environ.get("LD_LIBRARY_PATH", "")
+        os.environ["LD_LIBRARY_PATH"] = f"{cusparselt_path}:{existing}" if existing else cusparselt_path
+
+    os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
+    os.environ["MODELSCOPE_CACHE"] = "/Work21/2025/yanjiahao/modelscope_cache"
+
+    logger.info(f"[Phase2-vLLM] {len(segments)} segments to transcribe, gpu={gpu_id}")
+
+    from funasr.auto.auto_model_vllm import AutoModelVLLM
+    model = AutoModelVLLM(model=model_dir, tensor_parallel_size=1)
+    logger.info(f"[Phase2-vLLM] model ready, batch_size={batch_size}")
+
+    tmp_dir = tempfile.mkdtemp(prefix="funasr_vllm_p2_")
+    Path(audio_dir).mkdir(parents=True, exist_ok=True)
+    labels = []
+
+    def write_segment_wav(item, text):
+        src = item.get("path")
+        if not src or not os.path.isfile(src):
+            return
+        s, e = float(item["start_sec"]), float(item["end_sec"])
+        uid = f"{len(labels):08d}_{re.sub(r'[^0-9A-Za-z._-]+', '_', item.get('audio_id', 'x'))}"
+        out_wav = os.path.join(audio_dir, f"{uid}.wav")
+        try:
+            subprocess.run(
+                ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+                 "-ss", str(s), "-t", str(round(e - s, 3)),
+                 "-i", src, "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", out_wav],
+                check=True,
+            )
+        except Exception as ex:
+            logger.warning(f"[Export] ffmpeg failed {uid}: {ex}")
+            return
+        label = {k: item[k] for k in
+                 ["audio_id", "path", "start_sec", "end_sec", "duration_sec",
+                  "lang", "lang_prob", "mos_sig", "mos_bak", "mos_ovr"]
+                 if k in item}
+        label["uid"] = uid
+        label["path"] = out_wav
+        label["text"] = text
+        labels.append(label)
+
+    total = len(segments)
+    for batch_start in range(0, total, batch_size):
+        batch = segments[batch_start: batch_start + batch_size]
+        tmp_paths = []
+        valid_idx = []
+        for i, it in enumerate(batch):
+            try:
+                audio = load_audio(it["path"], it["start_sec"], it["end_sec"])
+                tp = os.path.join(tmp_dir, f"{batch_start+i}.wav")
+                sf.write(tp, audio, SAMPLE_RATE)
+                tmp_paths.append(tp)
+                valid_idx.append(i)
+            except Exception as ex:
+                logger.warning(f"[Phase2] prep failed {it.get('audio_id')}: {ex}")
+                tmp_paths.append(None)
+
+        valid_paths = [p for p in tmp_paths if p]
+        valid_items = [batch[i] for i in valid_idx]
+
+        if valid_paths:
+            try:
+                results = model.generate(valid_paths)
+                for it, res in zip(valid_items, results):
+                    text = (res.get("text", "") if isinstance(res, dict) else str(res)).strip()
+                    if text:
+                        write_segment_wav(it, text)
+            except Exception as ex:
+                logger.warning(f"[Phase2] vllm batch failed: {ex}")
+
+        for p in valid_paths:
+            try:
+                os.remove(p)
+            except Exception:
+                pass
+
+        done = min(batch_start + batch_size, total)
+        logger.info(f"[Phase2] {done}/{total} processed, {len(labels)} exported")
+
+    import shutil
+    shutil.rmtree(tmp_dir, ignore_errors=True)
+
+    Path(out_json).parent.mkdir(parents=True, exist_ok=True)
+    with open(out_json, "w", encoding="utf-8") as f:
+        json.dump(labels, f, ensure_ascii=False, indent=2)
+    logger.info(f"[Phase2] done. exported={len(labels)} -> {out_json}")
 
 
 def export_results(result_q: mp.Queue, out_json: str,
@@ -407,7 +555,7 @@ def main():
     p.add_argument("--audio_dir", default=None,
                    help="切片音频输出目录，默认 out_json 同级的 audio/")
     p.add_argument("--vad_model", default="fireredvad", choices=["silero", "fireredvad"])
-    p.add_argument("--asr_model", default="funasr", choices=["whisper", "funasr"])
+    p.add_argument("--asr_model", default="funasr", choices=["whisper", "funasr", "funasr_vllm"])
     p.add_argument("--whisper_model_dir",
         default="/Work21/2025/yanjiahao/modelscope_cache/models/AI-ModelScope/whisper-large-v3")
     p.add_argument("--funasr_model_dir",
@@ -429,6 +577,8 @@ def main():
     p.add_argument("--target_langs", nargs="*", default=["en", "zh"])
     p.add_argument("--min_lang_prob", type=float, default=0.90)
     p.add_argument("--whisper_batch_size", type=int, default=8)
+    p.add_argument("--vllm_batch_size", type=int, default=64,
+                   help="funasr_vllm 模式每批送给 vllm 的音频数")
     p.add_argument("--max_files", type=int, default=None)
     p.add_argument("--queue_maxsize", type=int, default=200)
     args = p.parse_args()
@@ -440,7 +590,6 @@ def main():
     audio_dir = args.audio_dir or str(Path(args.out_json).parent / "audio")
     gpus = [int(g) for g in args.gpus.split(",")]
 
-    # 队列
     ctx = mp.get_context("spawn")
     Q = lambda: ctx.Queue(maxsize=args.queue_maxsize)
     vad_q = Q()
@@ -457,7 +606,7 @@ def main():
     prod = ctx.Process(target=producer, args=(file_list, vad_q), name="Producer")
     processes.append(prod)
 
-    # VAD (单进程，模型加载慢)
+    # VAD
     if args.vad_model == "fireredvad":
         vad_p = ctx.Process(
             target=vad_worker_firered,
@@ -473,7 +622,7 @@ def main():
         )
     processes.append(vad_p)
 
-    # DNSMOS (1个 worker，使用第一张 GPU)
+    # DNSMOS
     dnsmos_p = ctx.Process(
         target=dnsmos_worker,
         args=(dnsmos_q, lid_q, args.dnsmos_dir, gpus[0],
@@ -482,48 +631,92 @@ def main():
     )
     processes.append(dnsmos_p)
 
-    # LID (1个 worker，使用第一张 GPU)
-    lid_p = ctx.Process(
-        target=lid_worker,
-        args=(lid_q, asr_q, args.lid_model_dir, gpus[0],
-              args.target_langs, args.min_lang_prob),
-        name="LID",
-    )
-    processes.append(lid_p)
-
-    # ASR (多 worker，每张 GPU 一个)
-    n_asr = len(gpus)
-    # 需要 n_asr 个 SENTINEL 才能关闭 result_q
-    # 但只有一个 asr_q，LID 只发一个 SENTINEL
-    # 用 forwarder 广播 SENTINEL
-    # 简化：只用1个 ASR worker 跑多卡（CUDA_VISIBLE_DEVICES=all，内部按 shard 分）
-    # 这里先用1个 worker 跑，用 gpus[0] 避免 GPU3
-    if args.asr_model == "whisper":
-        asr_p = ctx.Process(
-            target=whisper_asr_worker,
-            args=(asr_q, result_q, args.whisper_model_dir, gpus[0],
-                  args.whisper_batch_size),
-            name="ASR-Whisper",
+    if args.asr_model == "funasr_vllm":
+        # ── 两阶段方案 ─────────────────────────────────────────────────
+        # Phase 1: 多进程跑 VAD+DNSMOS+LID，通过的 segment 收集到 collect_q
+        # Phase 2: 所有子进程退出后，主进程独占 GPU 跑 vllm
+        # ─────────────────────────────────────────────────────────────
+        collect_q = ctx.Queue()   # LID 把通过的 segment 写这里
+        lid_p = ctx.Process(
+            target=lid_worker_collect,
+            args=(lid_q, collect_q, args.lid_model_dir, gpus[0],
+                  args.target_langs, args.min_lang_prob),
+            name="LID",
         )
+        processes.append(lid_p)
+
+        t0 = time.time()
+        for proc in processes:
+            proc.start()
+            logger.info(f"Started {proc.name} pid={proc.pid}")
+
+        # Phase 1: 主进程从 collect_q 收集，等 SENTINEL
+        segments_phase1 = []
+        logger.info("[Phase1] collecting segments from LID...")
+        while True:
+            item = collect_q.get()
+            if item is SENTINEL:
+                break
+            segments_phase1.append(item)
+
+        logger.info(f"[Phase1] collected {len(segments_phase1)} segments, waiting for all workers to exit...")
+        for proc in processes:
+            proc.join(timeout=60)
+            if proc.is_alive():
+                logger.warning(f"{proc.name} still alive, terminating")
+                proc.terminate()
+                proc.join(timeout=5)
+
+        elapsed_p1 = time.time() - t0
+        logger.info(f"[Phase1] done in {elapsed_p1:.1f}s, starting vllm Phase 2...")
+
+        # Phase 2: 全部子进程已退出，主进程安全初始化 vllm
+        funasr_vllm_phase2(
+            segments=segments_phase1,
+            model_dir=args.funasr_model_dir,
+            gpu_id=gpus[0],
+            batch_size=args.vllm_batch_size,
+            out_json=args.out_json,
+            audio_dir=audio_dir,
+        )
+
     else:
-        asr_p = ctx.Process(
-            target=funasr_asr_worker,
-            args=(asr_q, result_q, args.funasr_model_dir, gpus[0]),
-            name="ASR-FunASR",
+        # ── 普通模式 ───────────────────────────────────────────────────
+        lid_p = ctx.Process(
+            target=lid_worker,
+            args=(lid_q, asr_q, args.lid_model_dir, gpus[0],
+                  args.target_langs, args.min_lang_prob),
+            name="LID",
         )
-    processes.append(asr_p)
+        processes.append(lid_p)
 
-    # 启动所有进程
-    t0 = time.time()
-    for proc in processes:
-        proc.start()
-        logger.info(f"Started {proc.name} pid={proc.pid}")
+        t0 = time.time()
+        for proc in processes:
+            proc.start()
+            logger.info(f"Started {proc.name} pid={proc.pid}")
 
-    # Consumer 在主进程运行
-    export_results(result_q, args.out_json, audio_dir, n_sentinels=1)
+        if args.asr_model == "whisper":
+            asr_p = ctx.Process(
+                target=whisper_asr_worker,
+                args=(asr_q, result_q, args.whisper_model_dir, gpus[0],
+                      args.whisper_batch_size),
+                name="ASR-Whisper",
+            )
+        else:
+            asr_p = ctx.Process(
+                target=funasr_asr_worker,
+                args=(asr_q, result_q, args.funasr_model_dir, gpus[0]),
+                name="ASR-FunASR",
+            )
+        processes.append(asr_p)
+        asr_p.start()
+        logger.info(f"Started {asr_p.name} pid={asr_p.pid}")
+        export_results(result_q, args.out_json, audio_dir, n_sentinels=1)
 
-    for proc in processes:
-        proc.join()
+        for proc in processes:
+            proc.join(timeout=10)
+            if proc.is_alive():
+                proc.terminate()
 
     logger.info(f"Pipeline done in {time.time()-t0:.1f}s")
 

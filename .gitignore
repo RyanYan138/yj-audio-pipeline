@@ -25,3 +25,11 @@ dns_mos/core.*
 
 # models (too large for git)
 models/
+
+# test artifacts
+test/audio_200/
+test/*_tmp.sh
+test/bench_patch*.py
+test/benchmark_*.txt
+test/docker_*.sh
+test/docker_test_run.sh
