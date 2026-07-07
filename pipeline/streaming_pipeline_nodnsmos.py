@@ -110,7 +110,7 @@ def producer(audio_files: List[Tuple[str, str]], vad_q: mp.Queue):
 # Stage 2: VAD Worker
 # ─────────────────────────────────────────────
 
-def vad_worker_silero(vad_q: mp.Queue, dnsmos_q: mp.Queue,
+def vad_worker_silero(vad_q: mp.Queue, lid_q: mp.Queue,
                       min_dur: float, max_dur: float):
     """Silero VAD worker"""
     import torch
@@ -122,7 +122,7 @@ def vad_worker_silero(vad_q: mp.Queue, dnsmos_q: mp.Queue,
     while True:
         item = vad_q.get()
         if item is SENTINEL:
-            dnsmos_q.put(SENTINEL)
+            lid_q.put(SENTINEL)
             break
         audio_id, path = item["audio_id"], item["path"]
         try:
@@ -139,13 +139,13 @@ def vad_worker_silero(vad_q: mp.Queue, dnsmos_q: mp.Queue,
                 segments.append({"start_sec": round(s, 4), "end_sec": round(e, 4),
                                   "duration_sec": round(dur, 4)})
             for seg in segments:
-                dnsmos_q.put({**item, **seg})
+                lid_q.put({**item, **seg})
             logger.debug(f"[VAD] {audio_id}: {len(segments)} segs")
         except Exception as ex:
             logger.warning(f"[VAD] {audio_id} failed: {ex}")
 
 
-def vad_worker_firered(vad_q: mp.Queue, dnsmos_q: mp.Queue,
+def vad_worker_firered(vad_q: mp.Queue, lid_q: mp.Queue,
                        min_dur: float, max_dur: float,
                        model_dir: str, fireredvad_root: str):
     """FireRedVAD worker"""
@@ -161,7 +161,7 @@ def vad_worker_firered(vad_q: mp.Queue, dnsmos_q: mp.Queue,
     while True:
         item = vad_q.get()
         if item is SENTINEL:
-            dnsmos_q.put(SENTINEL)
+            lid_q.put(SENTINEL)
             break
         audio_id, path = item["audio_id"], item["path"]
         try:
@@ -171,89 +171,12 @@ def vad_worker_firered(vad_q: mp.Queue, dnsmos_q: mp.Queue,
                 dur = e - s
                 if dur < min_dur or (max_dur > 0 and dur > max_dur):
                     continue
-                dnsmos_q.put({**item,
+                lid_q.put({**item,
                                "start_sec": round(s, 4),
                                "end_sec": round(e, 4),
                                "duration_sec": round(dur, 4)})
         except Exception as ex:
             logger.warning(f"[VAD-FireRed] {audio_id} failed: {ex}")
-
-
-# ─────────────────────────────────────────────
-# Stage 3: DNSMOS Worker
-# ─────────────────────────────────────────────
-
-def dnsmos_worker(dnsmos_q: mp.Queue, lid_q: mp.Queue,
-                  dnsmos_dir: str, gpu_id: int,
-                  input_length: int, min_mos_ovr: float,
-                  min_mos_sig: float, min_mos_bak: float):
-    """DNSMOS 打分 + 过滤 worker — 模型常驻，每条音频直接推理"""
-    import onnxruntime as ort
-    from scipy.signal import stft
-    import numpy.polynomial.polynomial as poly
-
-    os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
-    providers = ["CUDAExecutionProvider", "CPUExecutionProvider"]
-    sess_sig = ort.InferenceSession(os.path.join(dnsmos_dir, "sig.onnx"), providers=providers)
-    sess_bak = ort.InferenceSession(os.path.join(dnsmos_dir, "bak_ovr.onnx"), providers=providers)
-
-    COEFS_SIG = np.array([9.651228e-01, 6.592638e-01, 7.572373e-02])
-    COEFS_BAK = np.array([-3.733460e+00, 2.700114e+00, -1.721333e-01])
-    COEFS_OVR = np.array([8.924547e-01, 6.609982e-01, 7.600270e-02])
-
-    logger.info(f"[DNSMOS gpu={gpu_id}] ready, providers={sess_sig.get_providers()}")
-
-    def score(audio: np.ndarray) -> Tuple[float, float, float]:
-        max_len = 30 * SAMPLE_RATE
-        if len(audio) > max_len: audio = audio[:max_len]
-        # 防止超长音频导致内存爆炸
-        max_len = 30 * SAMPLE_RATE
-        if len(audio) > max_len:
-            audio = audio[:max_len]
-        hop = SAMPLE_RATE
-        target = input_length * SAMPLE_RATE
-        if len(audio) < target:
-            audio = np.tile(audio, int(np.ceil(target / len(audio))))
-        num_hops = max(1, int(np.floor((len(audio) - target) / hop)) + 1)
-        sig_list, bak_list, ovr_list = [], [], []
-        for i in range(num_hops):
-            chunk = audio[i * hop: i * hop + target]
-            if len(chunk) < target:
-                chunk = np.pad(chunk, (0, target - len(chunk)))
-            try:
-                cp = np.pad(chunk, (160, 160))
-                _, _, Zxx = stft(cp, fs=SAMPLE_RATE, nperseg=320, noverlap=160,
-                                 nfft=320, boundary=None, padded=False)
-                lps = np.log10(np.maximum(np.abs(Zxx) ** 2, 1e-12)).T
-                feat = lps[np.newaxis, :, :].astype(np.float32)
-                if feat.ndim != 3 or feat.shape[1] > 10000:
-                    continue
-                raw_sig = float(np.array(sess_sig.run(None, {sess_sig.get_inputs()[0].name: feat})[0]).ravel()[0])
-                bv = np.array(sess_bak.run(None, {sess_bak.get_inputs()[0].name: feat})[0]).ravel()
-                sig_list.append(float(poly.polyval(raw_sig, COEFS_SIG)))
-                bak_list.append(float(poly.polyval(float(bv[1]), COEFS_BAK)))
-                ovr_list.append(float(poly.polyval(float(bv[2]), COEFS_OVR)))
-            except Exception:
-                continue
-        if not sig_list:
-            return (0.0, 0.0, 0.0)
-        return (round(float(np.mean(sig_list)), 3),
-                round(float(np.mean(bak_list)), 3),
-                round(float(np.mean(ovr_list)), 3))
-
-    while True:
-        item = dnsmos_q.get()
-        if item is SENTINEL:
-            lid_q.put(SENTINEL)
-            break
-        try:
-            audio = load_audio(item["path"], item["start_sec"], item["end_sec"])
-            mos_sig, mos_bak, mos_ovr = score(audio)
-            if mos_ovr < min_mos_ovr or mos_sig < min_mos_sig or mos_bak < min_mos_bak:
-                continue
-            lid_q.put({**item, "mos_sig": mos_sig, "mos_bak": mos_bak, "mos_ovr": mos_ovr})
-        except Exception as ex:
-            logger.warning(f"[DNSMOS] {item.get('audio_id')} failed: {ex}")
 
 
 def lid_worker(lid_q: mp.Queue, asr_q: mp.Queue,
@@ -653,7 +576,6 @@ def main():
     ctx = mp.get_context("spawn")
     Q = lambda: ctx.Queue(maxsize=args.queue_maxsize)
     vad_q = Q()
-    dnsmos_q = Q()
     lid_q = Q()
     asr_q = Q()
     result_q = Q()
@@ -670,26 +592,24 @@ def main():
     if args.vad_model == "fireredvad":
         vad_p = ctx.Process(
             target=vad_worker_firered,
-            args=(vad_q, dnsmos_q, args.min_dur, args.max_dur,
+            args=(vad_q, lid_q, args.min_dur, args.max_dur,
                   args.fireredvad_model, args.fireredvad_root),
             name="VAD-FireRed",
         )
     else:
         vad_p = ctx.Process(
             target=vad_worker_silero,
-            args=(vad_q, dnsmos_q, args.min_dur, args.max_dur),
+            args=(vad_q, lid_q, args.min_dur, args.max_dur),
             name="VAD-Silero",
         )
     processes.append(vad_p)
 
     # DNSMOS
-    dnsmos_p = ctx.Process(
-        target=dnsmos_worker,
-        args=(dnsmos_q, lid_q, args.dnsmos_dir, gpus[0],
-              9, args.min_mos_ovr, args.min_mos_sig, args.min_mos_bak),
-        name="DNSMOS",
-    )
-    processes.append(dnsmos_p)
+
+
+
+
+
 
     if args.asr_model == "funasr_vllm":
         # ── 两阶段方案 ─────────────────────────────────────────────────

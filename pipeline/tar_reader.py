@@ -43,11 +43,16 @@ def _decode_audio(data: bytes) -> tuple[np.ndarray, int]:
     with sf.SoundFile(io.BytesIO(data)) as f:
         sr = f.samplerate
         audio = f.read(dtype="float32", always_2d=False)
+    # 合并多声道为单声道，防止 faster-whisper MemoryError
+    if audio.ndim > 1:
+        audio = audio.mean(axis=-1)
     if sr != SAMPLE_RATE:
         import torch, torchaudio
         t = torch.from_numpy(audio).unsqueeze(0)
         audio = torchaudio.functional.resample(t, sr, SAMPLE_RATE).squeeze(0).numpy()
         sr = SAMPLE_RATE
+    if audio.ndim > 1:
+        audio = audio.mean(axis=0)
     return audio, sr
 
 

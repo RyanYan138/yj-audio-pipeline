@@ -37,9 +37,9 @@ FIREREDVAD_ROOT="${PROJECT_ROOT}/FireRedVAD"
 DNSMOS_DIR="${PROJECT_ROOT}/dns_mos"
 
 # ===== 按需修改（或命令行传参） =====
-TAR_PATH="${1:-${PROJECT_ROOT}/test/test_4.tar}"          # 第1个参数：输入 tar 包
+TAR_PATH="${1:-${PROJECT_ROOT}/test/audio.tar}"          # 第1个参数：输入 tar 包
 OUT_JSON="${2:-${PROJECT_ROOT}/output/tar_pipeline/labels.json}"  # 第2个参数：输出路径
-GPU="${3:-2}"                                              # 第3个参数：GPU 编号
+GPU="${3:-0}"                                              # 第3个参数：GPU 编号
 # =====================================
 
 # LD_LIBRARY_PATH：从 CONDA_PREFIX 自动补全 nvidia 库路径
@@ -71,7 +71,7 @@ echo "[$(date '+%F %T')] OUTPUT: ${OUT_JSON}  GPU: ${GPU}"
     --fireredvad_root   "${FIREREDVAD_ROOT}" \
     --dnsmos_dir        "${DNSMOS_DIR}" \
     --gpu               "${GPU}" \
-    --batch_size        64 \
+    --batch_size        16 \
     --min_dur           1.0 \
     --max_dur           30.0 \
     --min_mos_ovr       2.0 \

@@ -80,16 +80,10 @@ def load_audio(path: str, start_sec: float = 0.0, end_sec: float = -1.0) -> np.n
         f.seek(s)
         n = (e - s) if e > 0 else -1
         audio = f.read(n if n > 0 else -1, dtype="float32", always_2d=False)
-    # 多声道合并为单声道
-    if audio.ndim > 1:
-        audio = audio.mean(axis=-1)
     if sr != SAMPLE_RATE:
         import torchaudio, torch
         a = torch.from_numpy(audio).unsqueeze(0)
         audio = torchaudio.functional.resample(a, sr, SAMPLE_RATE).squeeze(0).numpy()
-    # 确保输出是1D
-    if audio.ndim > 1:
-        audio = audio.mean(axis=0)
     return audio
 
 
@@ -204,12 +198,6 @@ def dnsmos_worker(dnsmos_q: mp.Queue, lid_q: mp.Queue,
     logger.info(f"[DNSMOS gpu={gpu_id}] ready, providers={sess_sig.get_providers()}")
 
     def score(audio: np.ndarray) -> Tuple[float, float, float]:
-        max_len = 30 * SAMPLE_RATE
-        if len(audio) > max_len: audio = audio[:max_len]
-        # 防止超长音频导致内存爆炸
-        max_len = 30 * SAMPLE_RATE
-        if len(audio) > max_len:
-            audio = audio[:max_len]
         hop = SAMPLE_RATE
         target = input_length * SAMPLE_RATE
         if len(audio) < target:
@@ -220,23 +208,16 @@ def dnsmos_worker(dnsmos_q: mp.Queue, lid_q: mp.Queue,
             chunk = audio[i * hop: i * hop + target]
             if len(chunk) < target:
                 chunk = np.pad(chunk, (0, target - len(chunk)))
-            try:
-                cp = np.pad(chunk, (160, 160))
-                _, _, Zxx = stft(cp, fs=SAMPLE_RATE, nperseg=320, noverlap=160,
-                                 nfft=320, boundary=None, padded=False)
-                lps = np.log10(np.maximum(np.abs(Zxx) ** 2, 1e-12)).T
-                feat = lps[np.newaxis, :, :].astype(np.float32)
-                if feat.ndim != 3 or feat.shape[1] > 10000:
-                    continue
-                raw_sig = float(np.array(sess_sig.run(None, {sess_sig.get_inputs()[0].name: feat})[0]).ravel()[0])
-                bv = np.array(sess_bak.run(None, {sess_bak.get_inputs()[0].name: feat})[0]).ravel()
-                sig_list.append(float(poly.polyval(raw_sig, COEFS_SIG)))
-                bak_list.append(float(poly.polyval(float(bv[1]), COEFS_BAK)))
-                ovr_list.append(float(poly.polyval(float(bv[2]), COEFS_OVR)))
-            except Exception:
-                continue
-        if not sig_list:
-            return (0.0, 0.0, 0.0)
+            cp = np.pad(chunk, (160, 160))
+            _, _, Zxx = stft(cp, fs=SAMPLE_RATE, nperseg=320, noverlap=160,
+                             nfft=320, boundary=None, padded=False)
+            lps = np.log10(np.maximum(np.abs(Zxx) ** 2, 1e-12)).T
+            feat = lps[np.newaxis, :, :].astype(np.float32)
+            raw_sig = float(np.array(sess_sig.run(None, {sess_sig.get_inputs()[0].name: feat})[0]).ravel()[0])
+            bv = np.array(sess_bak.run(None, {sess_bak.get_inputs()[0].name: feat})[0]).ravel()
+            sig_list.append(float(poly.polyval(raw_sig, COEFS_SIG)))
+            bak_list.append(float(poly.polyval(float(bv[1]), COEFS_BAK)))
+            ovr_list.append(float(poly.polyval(float(bv[2]), COEFS_OVR)))
         return (round(float(np.mean(sig_list)), 3),
                 round(float(np.mean(bak_list)), 3),
                 round(float(np.mean(ovr_list)), 3))
@@ -280,22 +261,7 @@ def lid_worker(lid_q: mp.Queue, asr_q: mp.Queue,
             if audio_id not in lang_cache:
                 audio = load_audio(item["path"], item["start_sec"],
                                    min(item["end_sec"], item["start_sec"] + 12.0))
-                # 检查样本数防止 faster-whisper 内存爆炸
-                if audio.ndim != 1:
-                    audio = audio.mean(axis=-1) if audio.ndim == 2 else audio.flatten()
-                if len(audio) < 1600 or len(audio) > 15 * SAMPLE_RATE:
-                    logger.warning(f"[LID] {audio_id} bad length: {len(audio)} samples, ndim={audio.ndim}")
-                    continue
-                if len(audio) > 12 * SAMPLE_RATE:
-                    audio = audio[:12 * SAMPLE_RATE]
-                import signal as _sig
-                def _timeout(s, f): raise TimeoutError("lid timeout")
-                _sig.signal(_sig.SIGALRM, _timeout)
-                _sig.alarm(30)
-                try:
-                    _, info = model.transcribe(audio, task="transcribe", beam_size=1)
-                finally:
-                    _sig.alarm(0)
+                _, info = model.transcribe(audio, task="transcribe")
                 lang = info.language
                 prob = info.language_probability
                 lang_cache[audio_id] = (lang, prob)
@@ -307,9 +273,8 @@ def lid_worker(lid_q: mp.Queue, asr_q: mp.Queue,
             if prob < min_lang_prob:
                 continue
             asr_q.put({**item, "lang": lang, "lang_prob": round(prob, 4)})
-        except (Exception, MemoryError) as ex:
+        except Exception as ex:
             logger.warning(f"[LID] {audio_id} failed: {ex}")
-            import gc; gc.collect()
 
 
 # ─────────────────────────────────────────────
@@ -413,22 +378,7 @@ def lid_worker_collect(lid_q: mp.Queue, out_q: mp.Queue,
             if audio_id not in lang_cache:
                 audio = load_audio(item["path"], item["start_sec"],
                                    min(item["end_sec"], item["start_sec"] + 12.0))
-                # 检查样本数防止 faster-whisper 内存爆炸
-                if audio.ndim != 1:
-                    audio = audio.mean(axis=-1) if audio.ndim == 2 else audio.flatten()
-                if len(audio) < 1600 or len(audio) > 15 * SAMPLE_RATE:
-                    logger.warning(f"[LID] {audio_id} bad length: {len(audio)} samples, ndim={audio.ndim}")
-                    continue
-                if len(audio) > 12 * SAMPLE_RATE:
-                    audio = audio[:12 * SAMPLE_RATE]
-                import signal as _sig
-                def _timeout(s, f): raise TimeoutError("lid timeout")
-                _sig.signal(_sig.SIGALRM, _timeout)
-                _sig.alarm(30)
-                try:
-                    _, info = model.transcribe(audio, task="transcribe", beam_size=1)
-                finally:
-                    _sig.alarm(0)
+                _, info = model.transcribe(audio, task="transcribe")
                 lang = info.language
                 prob = info.language_probability
                 lang_cache[audio_id] = (lang, prob)
@@ -440,9 +390,8 @@ def lid_worker_collect(lid_q: mp.Queue, out_q: mp.Queue,
             if prob < min_lang_prob:
                 continue
             out_q.put({**item, "lang": lang, "lang_prob": round(prob, 4)})
-        except (Exception, MemoryError) as ex:
+        except Exception as ex:
             logger.warning(f"[LID] {audio_id} failed: {ex}")
-            import gc; gc.collect()
 
 
 def funasr_vllm_phase2(segments: List[dict],
