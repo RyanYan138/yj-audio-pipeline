@@ -1,19 +1,23 @@
 #!/usr/bin/env bash
 # =============================================================================
-# run_tar_pipeline_whisper_ckpt.sh — FireRedVAD + DNSMOS + faster-whisper 流水线
-#                                    （断点续跑，路径动态解析，可跨集群直接用）
+# run_tar_pipeline_whisper_batch_ckpt.sh
+# FireRedVAD + DNSMOS + LID(batch) + ASR(batch) 五阶段全流水线
 #
 # 用法:
-#   bash run_tar_pipeline_whisper_ckpt.sh [TAR_PATH] [OUT_JSON] [GPU]
+#   bash run_tar_pipeline_whisper_batch_ckpt.sh [TAR] [OUT_JSON] [GPU] [ASR_BATCH] [LID_BATCH]
+#
+# 参数说明:
+#   GPU         GPU 编号（默认 0）
+#   ASR_BATCH   ASR batch size（默认 16，RTX 4090 建议 32~64，V100 建议 8~16）
+#   LID_BATCH   LID batch size（默认 16，可与 ASR_BATCH 一致）
 #
 # 前提:
-#   conda activate <含 faster-whisper/onnxruntime/fireredvad 的环境>
-#   （106集群验证环境: funasr_vllm / yj_pipeline）
+#   conda activate faster_whisper
 # =============================================================================
 set -euo pipefail
 
 if [ -z "${CONDA_PREFIX:-}" ]; then
-    echo "[ERROR] 请先 conda activate <环境>"; exit 1
+    echo "[ERROR] 请先 conda activate faster_whisper"; exit 1
 fi
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -24,13 +28,15 @@ FIREREDVAD_MODEL="${PROJECT_ROOT}/models/FireRedVAD"
 FIREREDVAD_ROOT="${PROJECT_ROOT}/FireRedVAD"
 DNSMOS_DIR="${PROJECT_ROOT}/dns_mos"
 
-# ===== 按需修改（或命令行传参） =====
+# ===== 参数（可命令行传入） =====
 TAR_PATH="${1:-${PROJECT_ROOT}/test/audio_200.tar}"
-OUT_JSON="${2:-${PROJECT_ROOT}/output/tar_pipeline_whisper_ckpt/2audio_200/labels.json}"
+OUT_JSON="${2:-${PROJECT_ROOT}/output/tar_pipeline_whisper_batch/labels.json}"
 GPU="${3:-0}"
-# =====================================
+ASR_BATCH="${4:-32}"   # ASR batch size（4090 建议 32，V100 建议 8~16）
+LID_BATCH="${5:-16}"   # LID batch size（可与 ASR_BATCH/2 对齐）
+# ================================
 
-# LD_LIBRARY_PATH：从 CONDA_PREFIX 自动补全 nvidia/ctranslate2 库路径
+# LD_LIBRARY_PATH 动态补全
 for _NV in "${CONDA_PREFIX}"/lib/python3.*/site-packages/nvidia; do
   [ -d "$_NV" ] || continue
   for _d in "$_NV"/*/lib; do
@@ -48,11 +54,12 @@ export PYTHONPATH="${PIPELINE_DIR}:${PYTHONPATH:-}"
 
 mkdir -p "$(dirname "${OUT_JSON}")"
 
-echo "[$(date '+%F %T')] === tar pipeline whisper ckpt 开始 ==="
+echo "[$(date '+%F %T')] === tar pipeline whisper batch 开始 ==="
 echo "[$(date '+%F %T')] INPUT: ${TAR_PATH}  GPU: ${GPU}"
+echo "[$(date '+%F %T')] ASR_BATCH: ${ASR_BATCH}  LID_BATCH: ${LID_BATCH}"
 echo "[$(date '+%F %T')] OUTPUT: ${OUT_JSON}"
 
-"${CONDA_PREFIX}/bin/python" "${PIPELINE_DIR}/tar_pipeline_whisper_ckpt.py" \
+"${CONDA_PREFIX}/bin/python" "${PIPELINE_DIR}/tar_pipeline_whisper_batch_ckpt.py" \
     --tar_paths         "${TAR_PATH}" \
     --out_json          "${OUT_JSON}" \
     --whisper_model_dir "${WHISPER_MODEL}" \
@@ -60,7 +67,8 @@ echo "[$(date '+%F %T')] OUTPUT: ${OUT_JSON}"
     --fireredvad_root   "${FIREREDVAD_ROOT}" \
     --dnsmos_dir        "${DNSMOS_DIR}" \
     --gpu               "${GPU}" \
-    --batch_size        32 \
+    --batch_size        "${ASR_BATCH}" \
+    --lid_batch_size    "${LID_BATCH}" \
     --min_dur           1.0 \
     --max_dur           30.0 \
     --min_mos_ovr       2.0 \
