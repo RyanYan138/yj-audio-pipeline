@@ -43,13 +43,14 @@ GPU="${3:-0}"                                              # 第3个参数：GPU
 # =====================================
 
 # LD_LIBRARY_PATH：从 CONDA_PREFIX 自动补全 nvidia 库路径
-_NV="${CONDA_PREFIX}/lib/python3.12/site-packages/nvidia"
-if [ -d "$_NV" ]; then
+# 用 glob 匹配任意 python 版本目录（python3.10 / python3.12 等），不再硬编码版本号
+for _NV in "${CONDA_PREFIX}"/lib/python3.*/site-packages/nvidia; do
+  [ -d "$_NV" ] || continue
   for _d in "$_NV"/*/lib; do
     [ -d "$_d" ] && LD_LIBRARY_PATH="${_d}:${LD_LIBRARY_PATH:-}"
   done
-  export LD_LIBRARY_PATH
-fi
+done
+export LD_LIBRARY_PATH
 unset _NV _d
 
 export MODELSCOPE_CACHE="${PROJECT_ROOT}/models"
