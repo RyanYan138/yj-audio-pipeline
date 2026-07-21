@@ -5,9 +5,11 @@
 
 set -euo pipefail
 
-PROJECT_ROOT="/Work21/2025/yanjiahao/YJ-audio-pipeline/yj-audio-pipeline"
-CONDA_PREFIX="/Work21/2025/yanjiahao/conda-envs/funasr_vllm"
-PYTHON="${CONDA_PREFIX}/bin/python"
+PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ -z "${CONDA_PREFIX:-}" ]; then
+    echo "[ERROR] 请先 conda activate <环境>"; exit 1
+fi
+# python 通过 CONDA_PREFIX 动态解析
 
 TAR_PATH="${1:-${PROJECT_ROOT}/test/test_4.tar}"
 OUT_JSON="${2:-${PROJECT_ROOT}/output/tar_pipeline_ckpt/labels.json}"
@@ -30,7 +32,7 @@ echo "[$(date '+%F %T')] === tar pipeline ckpt (含DNSMOS) 开始 ==="
 echo "[$(date '+%F %T')] INPUT: ${TAR_PATH}  GPU: ${GPU}"
 echo "[$(date '+%F %T')] OUTPUT: ${OUT_JSON}"
 
-"${PYTHON}" "${PROJECT_ROOT}/pipeline/tar_pipeline_ckpt.py" \
+"${CONDA_PREFIX}/bin/python" "${PROJECT_ROOT}/pipeline/tar_pipeline_ckpt.py" \
     --tar_paths         "${TAR_PATH}" \
     --out_json          "${OUT_JSON}" \
     --funasr_model_dir  "${PROJECT_ROOT}/models/Fun-ASR-Nano-2512" \
