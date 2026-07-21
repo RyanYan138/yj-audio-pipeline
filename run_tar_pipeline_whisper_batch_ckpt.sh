@@ -30,7 +30,7 @@ DNSMOS_DIR="${PROJECT_ROOT}/dns_mos"
 
 # ===== 参数（可命令行传入） =====
 TAR_PATH="${1:-${PROJECT_ROOT}/test/audio_200.tar}"
-OUT_JSON="${2:-${PROJECT_ROOT}/output/tar_pipeline_whisper_batch/labels.json}"
+OUT_JSON="${2:-${PROJECT_ROOT}/output/tar_pipeline_whisper_batch/labels2.json}"
 GPU="${3:-0}"
 ASR_BATCH="${4:-32}"   # ASR batch size（4090 建议 32，V100 建议 8~16）
 LID_BATCH="${5:-16}"   # LID batch size（可与 ASR_BATCH/2 对齐）

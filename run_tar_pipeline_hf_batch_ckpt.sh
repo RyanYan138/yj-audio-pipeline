@@ -31,8 +31,8 @@ FIREREDVAD_ROOT="${PROJECT_ROOT}/FireRedVAD"
 DNSMOS_DIR="${PROJECT_ROOT}/dns_mos"
 
 TAR_PATH="${1:-${PROJECT_ROOT}/test/audio_200.tar}"
-OUT_JSON="${2:-${PROJECT_ROOT}/output/tar_pipeline_hf_batch/labels.json}"
-GPU="${3:-0}"
+OUT_JSON="${2:-${PROJECT_ROOT}/output/tar_pipeline_hf_batch/labels2.json}"
+GPU="${3:-1}"
 ASR_BATCH="${4:-8}"    # transformers pipeline batch（真 GPU batch，比 ct2 更充分利用显存）
 LID_BATCH="${5:-16}"   # LID ct2 batch
 
