@@ -23,7 +23,7 @@ PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PIPELINE_DIR="${PROJECT_ROOT}/pipeline"
 
 # ASR 用 HuggingFace safetensors 格式模型
-HF_MODEL="/Work21/2025/yanjiahao/modelscope_cache/models/AI-ModelScope/whisper-large-v3"
+HF_MODEL="${PROJECT_ROOT}/models/whisper-large-v3-hf"
 # LID 用 faster-whisper ct2 格式
 CT2_MODEL="${PROJECT_ROOT}/models/faster-whisper-large-v3"
 FIREREDVAD_MODEL="${PROJECT_ROOT}/models/FireRedVAD"

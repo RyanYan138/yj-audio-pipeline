@@ -33,3 +33,4 @@ test/bench_patch*.py
 test/benchmark_*.txt
 test/docker_*.sh
 test/docker_test_run.sh
+whisper-large-v3-hf
