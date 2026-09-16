@@ -1,4 +1,4 @@
-# outputs / large artifacts
+# Outputs and large artifacts
 output/
 dns_mos/output/
 asr/whisperoutput/
@@ -7,26 +7,33 @@ asr/whisperoutput/
 **/*.sqlite
 **/*.db
 
-# caches
+# Caches
 hf_cache/
 torch_cache/
 **/__pycache__/
-**/*.pyc
+**/*.py[cod]
+.DS_Store
 
-# env / local
+# Environments and local logs
 .env
 *.log
 
-# data (never commit)
+# Data and crash dumps (never commit)
 datas/
 data/
 core.*
 dns_mos/core.*
+test/audio_200.tar
+test/benchmark_1h/
 
-# models (too large for git)
+# Models are too large for Git
 models/
 
-# test artifacts
+# Generated office deliverables and local IPC sockets
+docs/reports/*.docx
+*.sock
+
+# Historical test artifacts
 test/audio_200/
 test/*_tmp.sh
 test/bench_patch*.py
